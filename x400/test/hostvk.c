@@ -23,9 +23,9 @@ int main(int argc, char **argv)
   printf("device %s apiVersion %u.%u.%u driver 0x%x\n", p.deviceName, VK_VERSION_MAJOR(p.apiVersion), VK_VERSION_MINOR(p.apiVersion), VK_VERSION_PATCH(p.apiVersion), p.driverVersion);
   uint32_t ne = 0; ee(pd, NULL, &ne, NULL); VkExtensionProperties *e = calloc(ne, sizeof *e); ee(pd, NULL, &ne, e);
   printf("%u device extensions\n", ne);
-  const char *want[] = { "VK_KHR_maintenance5", "VK_EXT_robustness2", "VK_KHR_robustness2", "VK_EXT_image_robustness", "VK_EXT_line_rasterization",
+  const char *want[] = { "VK_KHR_maintenance5", "VK_EXT_queue_family_foreign", "VK_EXT_external_memory_dma_buf", "VK_EXT_robustness2", "VK_KHR_robustness2", "VK_EXT_image_robustness", "VK_EXT_line_rasterization",
     "VK_EXT_custom_border_color", "VK_EXT_provoking_vertex", "VK_EXT_transform_feedback", "VK_EXT_conditional_rendering", "VK_KHR_external_memory_fd",
-    "VK_EXT_external_memory_dma_buf", "VK_EXT_image_drm_format_modifier", "VK_EXT_physical_device_drm", "VK_KHR_timeline_semaphore",
+    "VK_EXT_external_memory_dma_buf","VK_EXT_queue_family_foreign","VK_KHR_external_memory_fd", "VK_EXT_image_drm_format_modifier", "VK_EXT_physical_device_drm", "VK_KHR_timeline_semaphore",
     "VK_KHR_maintenance4", "VK_KHR_dynamic_rendering", "VK_EXT_extended_dynamic_state", "VK_EXT_extended_dynamic_state2", "VK_EXT_extended_dynamic_state3",
     "VK_EXT_scalar_block_layout", "VK_KHR_draw_indirect_count", "VK_EXT_index_type_uint8", "VK_KHR_swapchain", "VK_EXT_descriptor_indexing", NULL };
   for (int i = 0; want[i]; i++) { int f = 0; for (uint32_t j = 0; j < ne; j++) if (!strcmp(e[j].extensionName, want[i])) f = 1; printf("  %-38s %s\n", want[i], f ? "YES" : "no"); }

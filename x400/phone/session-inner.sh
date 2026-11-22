@@ -34,6 +34,11 @@ case "${X400_GPU:-auto}" in
     fi ;;
 esac
 echo "x400: desktop GPU = $GPU_USED" > /tmp/gpu-choice.txt
+if [ "$GPU_USED" = zink ]; then
+  # what the guest's Vulkan offers for dma-buf: GBM only allocates real buffers if Zink reports dmabuf import/export
+  timeout 40 vulkaninfo > /tmp/vulkaninfo.log 2>&1
+  { echo "== vulkan dma-buf extensions"; grep -o -E 'VK_(KHR_external_memory_fd|EXT_external_memory_dma_buf|EXT_queue_family_foreign|EXT_image_drm_format_modifier|KHR_external_semaphore_fd)' /tmp/vulkaninfo.log | sort -u; echo "== end"; } >> /tmp/gpu-choice.txt
+fi
 cat /tmp/eglprobe.log >> /tmp/gpu-choice.txt 2>/dev/null
 export KWIN_COMPOSE=${KWIN_COMPOSE:-O2}
 export QT_QUICK_BACKEND=software KDE_SESSION_VERSION=6 KDE_APPLICATIONS_AS_SCOPE=0
@@ -44,7 +49,13 @@ pipewire > /tmp/pw.log 2>&1 &
 sleep 2
 wireplumber > /tmp/wp.log 2>&1 &
 sleep 2
-QT_LOGGING_RULES="kwin_screencast.debug=true" PIPEWIRE_DEBUG=${PWDBG:-2} kwin_wayland --virtual --no-lockscreen --width 2112 --height 1320 --socket wayland-x400 > /tmp/kwin.log 2>&1 &
+# With Zink, KWin runs under gdb in batch mode: if it dies, the backtrace ends /tmp/kwin.log (guest_start.sh copies it out).
+KWIN=kwin_wayland
+if [ "$GPU_USED" = zink ] && command -v gdb >/dev/null; then
+  KWIN="gdb -q -batch -ex 'handle SIGPIPE SIGUSR1 SIGUSR2 SIG34 SIG35 nostop noprint' -ex run -ex 'info registers pc' -ex 'thread apply all bt 25' --args kwin_wayland"
+fi
+export QT_LOGGING_RULES="kwin_screencast.debug=true" PIPEWIRE_DEBUG=${PWDBG:-2}
+eval $KWIN --virtual --no-lockscreen --width 2112 --height 1320 --socket wayland-x400 > /tmp/kwin.log 2>&1 &
 sleep 6
 export WAYLAND_DISPLAY=wayland-x400 QT_QPA_PLATFORM=wayland
 $L/kglobalacceld > /tmp/kga.log 2>&1 &

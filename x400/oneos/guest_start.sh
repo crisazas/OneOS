@@ -111,4 +111,5 @@ echo "[UI Activator] Home activated! (linux-x400 desktop)" >> /data/local/tmp/ui
 
 # Stay in the foreground for the session's watcher; the way back ends this namespace.
 while kill -0 $DESK 2>/dev/null; do sleep 5; done
+for f in kwin.log; do cp "$R/tmp/$f" "$D/logs/$f" 2>/dev/null; done
 say "desktop session ended"
