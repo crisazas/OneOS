@@ -1,0 +1,114 @@
+#!/system/bin/sh
+# linux-x400: guest_start.sh for a Linux desktop guest, staged in place of OneOS's Android one (switcher/assets/guest_start.sh).
+# oneos_switch.sh copies it to $STAGE/data/guest_start.sh and runs it at [6/6] as
+#     $BB unshare -m $BB sh "$STAGE/data/guest_start.sh" > "$STAGE/data/takeover.log"
+# with One UI's framework and surfaceflinger stopped. Everything started here lives in this mount namespace, which
+# oneos_switch.sh records (guest_mntns) and return_to_oneui.sh ends as a whole.
+#
+# What the session watcher of oneos_switch.sh checks, and how this script meets it:
+#  - a process called surfaceflinger, once "SurfaceFlinger PID:" is in takeover.log: One UI's own surfaceflinger binary is
+#    started here as a plain child (as OneOS's Android guest starts its own); init does not know it, so the session's
+#    `ctl.stop surfaceflinger` loop leaves it alone;
+#  - the takeover process alive in its namespace: this script stays in the foreground until the desktop ends;
+#  - "Home activated" in /data/local/tmp/ui_activator.log within ONEOS_RETURN_BLACK: written once the first frame is shown.
+# The way back is OneOS's (Volume Up + Volume Down for 3 s, the app, adb), never this script's.
+STAGE=/data/local/tmp/oneos
+R=$STAGE/rootfs
+D=$STAGE/data/x400
+BB=""
+for c in /data/adb/ksu/bin/busybox /data/adb/ap/bin/busybox /data/adb/magisk/busybox; do
+    [ -x "$c" ] && { BB=$c; break; }
+done
+[ -n "$BB" ] || { echo "[x400] FATAL: no busybox. Not starting the guest."; exit 1; }
+say() { echo "[x400] $(date +%T) $*"; }
+say "Linux guest starting in mount namespace $(readlink /proc/$$/ns/mnt)"
+# Anything of an earlier session that is still alive (a second desktop, an inputd that holds the touchscreen) is ended first:
+# two desktops saturated the CPU and the memory, and a left-over inputd with EVIOCGRAB took the touchscreen from One UI.
+# Only processes whose root is a chroot of ours are touched.
+OLD=0
+for sig in TERM KILL; do
+    for p in /proc/[0-9]*; do
+        r=$(readlink "$p/root" 2>/dev/null)
+        case "$r" in /data/local/tmp/x400root|/data/local/tmp/x400root/*) kill -$sig "${p#/proc/}" 2>/dev/null && OLD=$((OLD + 1));; esac
+    done
+    [ "$OLD" -gt 0 ] && sleep 2
+done
+[ "$OLD" -gt 0 ] && say "ended $OLD process(es) of an earlier x400 session"
+$BB mount --make-rprivate / || { say "FATAL: could not make the mounts private"; exit 1; }
+[ -x "$R/usr/bin/kwin_wayland" ] || { say "FATAL: $R is not the Linux image (guest_prepare.sh mounts it)"; exit 1; }
+
+# The guest's own writable places, in this namespace only.
+mkdir -p "$D/fb" "$D/logs"
+$BB mount -t tmpfs -o mode=1777 tmpfs "$R/tmp"
+$BB mount -t tmpfs -o mode=755 tmpfs "$R/run"
+$BB mount --bind /dev "$R/dev"
+$BB mount -t devpts -o newinstance,ptmxmode=0666,mode=620 devpts "$R/dev/pts" 2>/dev/null || $BB mount --bind /dev/pts "$R/dev/pts"
+$BB mount -t proc proc "$R/proc"
+$BB mount -t sysfs sysfs "$R/sys"
+mkdir -p "$R/tmp/fb"; $BB mount --bind "$D/fb" "$R/tmp/fb"
+if [ -d "$STAGE/x400/mesa25" ]; then
+    mkdir -p "$R/tmp/mesa25"; $BB mount --bind "$STAGE/x400/mesa25" "$R/tmp/mesa25" && say "Mesa 25.0.7 for Zink bound at /tmp/mesa25"
+fi
+for f in capture inputd session-inner.sh cpu-sample.sh; do
+    : > "$R/tmp/$f"; $BB mount --bind "$STAGE/x400/$f" "$R/tmp/$f"
+done
+say "guest filesystems ready: $(grep -c " $R" /proc/mounts) mounts under $R"
+
+# The display. OneOS stopped One UI's surfaceflinger and its watcher keeps init's copy stopped; the desktop's layer needs a
+# surfaceflinger, so One UI's binary runs here as this guest's own (the composer first, as OneOS's Android guest does).
+COMPOSER_SVC=""
+for c in vendor.hwcomposer-3 vendor.qti.hardware.display.composer; do
+    [ -n "$(getprop init.svc.$c)" ] && { COMPOSER_SVC=$c; break; }
+done
+[ -n "$COMPOSER_SVC" ] || COMPOSER_SVC=$(getprop | $BB sed -n 's/^\[init\.svc\.\([^]]*\)\]: \[running\]$/\1/p' | $BB grep -m1 -E 'hwcomposer|display\.composer|graphics\.composer')
+if [ -n "$COMPOSER_SVC" ]; then
+    setprop ctl.stop "$COMPOSER_SVC"
+    n=0; while [ $n -lt 30 ] && [ "$(getprop init.svc.$COMPOSER_SVC)" != stopped ]; do n=$((n + 1)); sleep 0.1; done
+    setprop ctl.start "$COMPOSER_SVC"
+    n=0; while [ $n -lt 30 ] && ! service check android.hardware.graphics.composer3.IComposer/default 2>/dev/null | grep -q ': found'; do n=$((n + 1)); sleep 0.1; done
+    say "composer $COMPOSER_SVC restarted ($(getprop init.svc.$COMPOSER_SVC))"
+fi
+# The composer's rc has "onrestart restart surfaceflinger": any surfaceflinger now is init's, which the session keeps stopped.
+setprop ctl.stop surfaceflinger
+n=0; while [ $n -lt 20 ] && pidof surfaceflinger >/dev/null; do kill -9 $(pidof surfaceflinger) 2>/dev/null; n=$((n + 1)); sleep 0.1; done
+/system/bin/surfaceflinger > "$D/logs/surfaceflinger.log" 2>&1 &
+SF_PID=$!
+echo "[Pivoted Root] SurfaceFlinger PID: $SF_PID"
+n=0; while [ $n -lt 50 ] && ! service check SurfaceFlinger 2>/dev/null | grep -q ': found'; do n=$((n + 1)); sleep 0.1; done
+say "surfaceflinger $SF_PID up after $((n))00 ms ($(service check SurfaceFlinger 2>/dev/null | tail -c 20))"
+# No framework is left to power the panel on: ask surfaceflinger (the display helper does, with --power).
+
+# The GPU: virglrenderer's Venus server, outside the chroot, on Samsung's Vulkan, its socket inside the guest's /tmp.
+VKR_DMA_HEAP_NODE=/dev/dma_heap/system ANDROID_EMU_VK_LOADER_PATH=/system/lib64/libvulkan.so VIRGL_LOG_LEVEL=info \
+    "$STAGE/x400/x400vt" --venus --no-fork --socket-path="$R/tmp/.virgl_test" > "$D/logs/venus.log" 2>&1 &
+say "Venus server $!"
+sleep 1
+
+# A frame file left by an earlier session has a high seq and would pass the wait below at once, before this desktop has drawn
+# anything (the display helper then found no file and left: the desktop ran and nothing showed it).
+rm -f "$D/fb/fb.bin"
+
+# The desktop, inside the chroot (KWin virtual, Plasma, the capture into $D/fb/fb.bin, the touch daemon).
+$BB chroot "$R" /usr/bin/env -i PATH=/usr/bin:/bin RUNSECS=0 /usr/bin/dbus-run-session -- sh /tmp/session-inner.sh > "$D/logs/session-inner.log" 2>&1 &
+DESK=$!
+say "desktop session $DESK"
+
+# The first frame, then the layer that shows it, then OneOS's "home" mark for its watcher.
+n=0
+while [ $n -lt 120 ]; do
+    [ -f "$D/fb/fb.bin" ] && [ "$(od -A n -t u8 -j 32 -N 8 "$D/fb/fb.bin" 2>/dev/null | tr -d ' ')" -gt 0 ] 2>/dev/null && break
+    kill -0 $DESK 2>/dev/null || { say "the desktop session ended before its first frame"; break; }
+    sleep 1; n=$((n + 1))
+done
+say "first frame after ${n}s"
+"$STAGE/x400/display.sh" "$STAGE/x400" "$D/fb/fb.bin" 2112 1320 --power > "$D/logs/display.log" 2>&1 &
+say "display helper $!"
+sleep 3
+# What the desktop chose for its GPU (session-inner.sh probes Zink and falls back to llvmpipe), copied out of the guest's /tmp.
+cp "$R/tmp/gpu-choice.txt" "$D/logs/gpu-choice.txt" 2>/dev/null
+say "$(head -n 1 "$D/logs/gpu-choice.txt" 2>/dev/null || echo 'desktop GPU: not reported')"
+echo "[UI Activator] Home activated! (linux-x400 desktop)" >> /data/local/tmp/ui_activator.log
+
+# Stay in the foreground for the session's watcher; the way back ends this namespace.
+while kill -0 $DESK 2>/dev/null; do sleep 5; done
+say "desktop session ended"
