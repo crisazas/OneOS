@@ -1,4 +1,5 @@
-// Credit: the way a layer above One UI is made without system_server (a parentless SurfaceControl BLAST layer by reflection, a BLASTBufferQueue)
+// Credit: the way a layer above One UI is made without system_server (a parentless SurfaceControl BLAST layer by reflection, a BLASTBufferQueue,
+// and powering the panel through DisplayControl and setDisplayPowerMode)
 // follows OneiOS's runtime/display/java/OneiOSDisplay.java (MIT), by Akshay CM (akshaynexus), Musicalista and contributors,
 // https://github.com/Musicalista/OneiOS-A56. Written here, not copied. See x400/CREDITS.md.
 // linux-x400: shows the frames a Linux guest writes into a shared file on a SurfaceControl layer above One UI.
@@ -21,14 +22,19 @@ public final class X400Display {
     }
 
     private static int run(String[] a) throws Exception {
-        if (a.length < 4) { log("usage: X400Display LIB FILE WIDTH HEIGHT [Z]"); return 2; }
+        if (a.length < 4) { log("usage: X400Display LIB FILE WIDTH HEIGHT [Z|--power]"); return 2; }
+        boolean power = false;
+        for (String x : a) if (x.equals("--power")) power = true;
         System.load(a[0]);
         String file = a[1];
         int w = Integer.parseInt(a[2]), h = Integer.parseInt(a[3]);
-        int z = a.length > 4 ? Integer.parseInt(a[4]) : Integer.MAX_VALUE - 2;
+        int z = a.length > 4 && !a[4].equals("--power") ? Integer.parseInt(a[4]) : Integer.MAX_VALUE - 2;
         SC = Class.forName("android.view.SurfaceControl");
         TX = Class.forName("android.view.SurfaceControl$Transaction");
         Object tx = TX.getConstructor().newInstance();
+        // With One UI's framework stopped nobody asks surfaceflinger to power the panel (POWER_MODE_NORMAL, 2), and the panel
+        // stays dark though the layer is composed.
+        if (power) powerOn();
         Object layer = null, queue = null, surface = null;
         int result;
         try {
@@ -60,6 +66,31 @@ public final class X400Display {
             log("layer removed");
         }
         return result < 0 ? 4 : 0;
+    }
+
+    private static void powerOn() {
+        try {
+            Object token;
+            try {
+                String jars = System.getenv("SYSTEMSERVERCLASSPATH");
+                if (jars == null || jars.isEmpty()) jars = "/system/framework/services.jar";
+                ClassLoader loader = (ClassLoader) Class.forName("dalvik.system.PathClassLoader")
+                    .getConstructor(String.class, ClassLoader.class).newInstance(jars, ClassLoader.getSystemClassLoader());
+                Class<?> control = loader.loadClass("com.android.server.display.DisplayControl");
+                Method load = Runtime.class.getDeclaredMethod("loadLibrary0", Class.class, String.class);
+                load.setAccessible(true);
+                load.invoke(Runtime.getRuntime(), control, "android_servers");
+                long[] ids = (long[]) control.getMethod("getPhysicalDisplayIds").invoke(null);
+                token = control.getMethod("getPhysicalDisplayToken", long.class).invoke(null, ids[0]);
+            } catch (Throwable older) {
+                long[] ids = (long[]) SC.getMethod("getPhysicalDisplayIds").invoke(null);
+                token = SC.getMethod("getPhysicalDisplayToken", long.class).invoke(null, ids[0]);
+            }
+            SC.getMethod("setDisplayPowerMode", Class.forName("android.os.IBinder"), int.class).invoke(null, token, 2);
+            log("panel powered on (POWER_MODE_NORMAL)");
+        } catch (Throwable refused) {
+            log("the panel could not be powered on (" + refused + ")");
+        }
     }
 
     private static boolean call(Object tx, String name, Class<?>[] types, Object... args) {

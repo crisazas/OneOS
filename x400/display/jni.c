@@ -26,8 +26,13 @@ JNIEXPORT jint JNICALL Java_X400Display_nRun(JNIEnv *env, jclass type, jobject s
   sigemptyset(&sa.sa_mask);
   sigaction(SIGTERM, &sa, NULL); sigaction(SIGINT, &sa, NULL); sigaction(SIGHUP, &sa, NULL);
   const char *path = (*env)->GetStringUTFChars(env, file, NULL);
-  int fd = open(path, O_RDONLY | O_CLOEXEC);
-  if (fd < 0) { fprintf(stderr, "x400-display: %s: %s\n", path, strerror(errno)); (*env)->ReleaseStringUTFChars(env, file, path); return -1; }
+  // The guest creates the file when its capture starts, which can be after the layer is up: wait for it (up to 5 minutes).
+  int fd = -1;
+  for (int waited = 0; fd < 0 && waited < 3000 && !stopping; waited++) {
+    fd = open(path, O_RDONLY | O_CLOEXEC);
+    if (fd < 0) usleep(100000);
+  }
+  if (fd < 0) { fprintf(stderr, "x400-display: %s: %s\n", path, stopping ? "stopped while waiting" : strerror(errno)); (*env)->ReleaseStringUTFChars(env, file, path); return -1; }
   (*env)->ReleaseStringUTFChars(env, file, path);
   struct stat st; fstat(fd, &st);
   size_t size = (size_t)st.st_size;

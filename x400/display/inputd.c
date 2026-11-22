@@ -4,7 +4,8 @@
 // rot 1 (default): x' = y * W / (Ymax+1), y' = (Xmax - x) * H / (Xmax+1)    rot 0: no rotation    rot 3: the opposite turn
 // Usage: inputd [--touch /dev/input/event8] [--pen /dev/input/event10] [--rot N] [--size WxH] [--grab] [--quiet]
 // --grab takes EVIOCGRAB on the touchscreen so One UI does not also see the touches; closing the fd (a crash included)
-// gives it back. Never opens the side keys (event0..event4).
+// gives it back. The grab is also let go as soon as the Wayland server goes away or a stop signal comes, and only held while
+// KWin is there. Never opens the side keys (event0..event4).
 #define _GNU_SOURCE
 #include "fake-input-client-protocol.h"
 #include <errno.h>
@@ -124,7 +125,8 @@ int main(int argc, char **argv)
     }
     (void)pen_down;
   }
-  if (t.fd >= 0) close(t.fd);
+  if (t.fd >= 0) { if (grab) ioctl(t.fd, EVIOCGRAB, 0); close(t.fd); }
+  if (p.fd >= 0) close(p.fd);
   if (!quiet) fprintf(stderr, "inputd: stopped after %lu touch events\n", n);
   return 0;
 }
