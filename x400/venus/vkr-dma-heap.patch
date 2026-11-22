@@ -1,0 +1,136 @@
+--- a/src/venus/vkr_device_memory.c
++++ b/src/venus/vkr_device_memory.c
+@@ -148,6 +148,61 @@
+ 
+ #endif /* HAVE_LINUX_UDMABUF_H && HAVE_MEMFD_CREATE */
+ 
++#if defined(__linux__) && __has_include(<linux/dma-heap.h>)
++#include <fcntl.h>
++#include <linux/dma-heap.h>
++#include <sys/ioctl.h>
++
++static VkResult
++vkr_dma_heap_get_fd_info_from_allocation_info(struct vkr_physical_device *physical_dev,
++                                              const VkMemoryAllocateInfo *alloc_info,
++                                              int *out_heap_buf_fd,
++                                              VkImportMemoryFdInfoKHR *out_fd_info)
++{
++   struct dma_heap_allocation_data alloc = {
++      .len = align(alloc_info->allocationSize, getpagesize()),
++      .fd_flags = O_RDWR | O_CLOEXEC,
++   };
++
++   if (ioctl(physical_dev->dma_heap_fd, DMA_HEAP_IOCTL_ALLOC, &alloc) < 0) {
++      vkr_log("ioctl DMA_HEAP_IOCTL_ALLOC failed (%s)", strerror(errno));
++      return VK_ERROR_OUT_OF_DEVICE_MEMORY;
++   }
++
++   const int heap_buf_fd = (int)alloc.fd;
++   const int import_fd = os_dupfd_cloexec(heap_buf_fd);
++   if (import_fd < 0) {
++      vkr_log("os_dupfd_cloexec failed (%s)", strerror(errno));
++      close(heap_buf_fd);
++      return VK_ERROR_OUT_OF_HOST_MEMORY;
++   }
++
++   *out_heap_buf_fd = heap_buf_fd;
++   *out_fd_info = (VkImportMemoryFdInfoKHR){
++      .sType = VK_STRUCTURE_TYPE_IMPORT_MEMORY_FD_INFO_KHR,
++      .pNext = alloc_info->pNext,
++      .fd = import_fd,
++      .handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT,
++   };
++
++   return VK_SUCCESS;
++}
++
++#else /* __linux__ && __has_include(<linux/dma-heap.h>) */
++
++static inline VkResult
++vkr_dma_heap_get_fd_info_from_allocation_info(
++   UNUSED struct vkr_physical_device *physical_dev,
++   UNUSED const VkMemoryAllocateInfo *alloc_info,
++   UNUSED int *out_heap_buf_fd,
++   UNUSED VkImportMemoryFdInfoKHR *out_fd_info)
++{
++   vkr_log("dma_heap_allocation is not enabled");
++   return VK_ERROR_OUT_OF_DEVICE_MEMORY;
++}
++
++#endif /* __linux__ && __has_include(<linux/dma-heap.h>) */
++
+ #ifdef ENABLE_GBM_ALLOCATION
+ #include <gbm.h>
+ 
+@@ -388,7 +443,10 @@
+             export_info = NULL;
+          }
+ 
+-         if (force_udmabuf_import) {
++         if (physical_dev->dma_heap_fd >= 0) {
++            args->ret = vkr_dma_heap_get_fd_info_from_allocation_info(
++               physical_dev, alloc_info, &udmabuf_fd, &local_import_info);
++         } else if (force_udmabuf_import) {
+             /* To be noted, there are 2 limits for udmabuf:
+              * - list_limit: udmabuf_create_list->count limit. Default is 1024.
+              * - size_limit_mb: Max size of a dmabuf, in megabytes. Default is 64.
+--- a/src/venus/vkr_physical_device.c
++++ b/src/venus/vkr_physical_device.c
+@@ -43,6 +43,31 @@
+ 
+ #endif /* HAVE_LINUX_UDMABUF_H */
+ 
++/*
++ * Fallback allocator for drivers that cannot export memory and have no gbm: host
++ * visible memory is carved from a dma-heap and imported as dma-buf. The heap node
++ * defaults to /dev/dma_heap/system and can be overridden with the environment
++ * variable VKR_DMA_HEAP_NODE (full path of the heap device).
++ */
++#include <fcntl.h>
++
++#define VKR_DMA_HEAP_DEFAULT_NODE "/dev/dma_heap/system"
++
++static int
++vkr_physical_device_open_dma_heap(void)
++{
++   const char *node = getenv("VKR_DMA_HEAP_NODE");
++   if (!node || !node[0])
++      node = VKR_DMA_HEAP_DEFAULT_NODE;
++
++   const int fd = open(node, O_RDONLY | O_CLOEXEC);
++   if (fd < 0)
++      vkr_log("failed to open dma-heap %s: %s", node, strerror(errno));
++   else
++      vkr_log("dma-heap %s opened for host visible memory", node);
++   return fd;
++}
++
+ #ifdef ENABLE_GBM_ALLOCATION
+ #include <gbm.h>
+ #ifdef MINIGBM
+@@ -247,6 +272,14 @@
+       else
+          vkr_log("missing VK_EXT_external_memory_dma_buf for gbm import!");
+    }
++
++   physical_dev->dma_heap_fd = -1;
++   if (!physical_dev->is_dma_buf_fd_export_supported &&
++       !physical_dev->is_opaque_fd_export_supported && !physical_dev->gbm_device &&
++       physical_dev->udmabuf_dev_fd < 0 &&
++       physical_dev->EXT_external_memory_dma_buf) {
++      physical_dev->dma_heap_fd = vkr_physical_device_open_dma_heap();
++   }
+ }
+ 
+ static void
+--- a/src/venus/vkr_physical_device.h
++++ b/src/venus/vkr_physical_device.h
+@@ -37,6 +37,8 @@
+    bool is_opaque_fd_export_supported;
+    void *gbm_device;
+    int udmabuf_dev_fd;
++   /* open dma-heap node used to allocate host visible memory, or -1 */
++   int dma_heap_fd;
+ 
+    VkQueueFamilyProperties *queue_family_properties;
+    uint32_t queue_family_property_count;

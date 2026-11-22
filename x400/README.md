@@ -16,8 +16,8 @@ outside the chroot) -> Samsung's Vulkan on the Mali-G68.
 ## Build (on the PC; needs sudo, qemu-user-static, gcc-aarch64-linux-gnu, libvulkan-dev, the Android NDK 28.2 and SDK build-tools)
 - `x400/build-rootfs-plasma.sh` -> `out/rootfs-plasma.ext4` (6 GB, Ubuntu 26.04.1 arm64 + Plasma + PipeWire + wireplumber).
   `capture` and `inputd` are compiled inside that chroot (they need libpipewire and libwayland): see the commands in `PLAN-linux-x400.md`.
-- `x400/venus/build.sh` -> `out/venus-build/virgl_test_server` (inputs in `out/virgl`: virglrenderer `7e17c8e` + the dma-heap patch +
-  `x400/venus/vtest-x400.patch`).
+- `x400/venus/build.sh` -> `out/venus-build/virgl_test_server` (`x400/venus/prepare-virgl.sh` makes `out/virgl` from a checkout of Droid-VM's virglrenderer at `7e17c8e` plus `x400/venus/vkr-dma-heap.patch` and
+  `x400/venus/vtest-x400.patch`, both ours).
 - `x400/display/build.sh` -> `out/display/{x400-display.dex,libx400display.so}`.
 
 ## Run (OneOS's shape: preflight, session, way back)

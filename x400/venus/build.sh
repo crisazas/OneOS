@@ -3,7 +3,8 @@
 # contributors, https://github.com/Musicalista/OneiOS-A56; no license line in that file, and OneiOS has no license file: see x400/CREDITS.md).
 # Builds virgl_test_server --venus for Android arm64 (bionic) with the NDK, without GL: the fork's vtest server and
 # src/virglrenderer.c over the Venus core (src/venus/vkr_*); vrend/drm/proxy are stubs (vrend_stub.c).
-# Inputs (git-ignored): out/virgl (virglrenderer 7e17c8e + virglrenderer-dma-heap.patch), out/venus-src (stub/ of runtime/venus).
+# Inputs (git-ignored): out/virgl = virglrenderer 7e17c8e (Droid-VM's fork, MIT upstream) + x400/venus/vkr-dma-heap.patch +
+# x400/venus/vtest-x400.patch (both ours, MIT); out/venus-src = the stub/ headers (see x400/CREDITS.md).
 set -eu
 X=$(cd "$(dirname "$0")" && pwd)
 V=$X/../../out/virgl; S=$X/../../out/venus-src; OUT=${1:-$X/../../out/venus-build}

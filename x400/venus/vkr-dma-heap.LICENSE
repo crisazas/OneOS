@@ -1,0 +1,7 @@
+SPDX-License-Identifier: MIT
+Copyright 2026 linux-x400 contributors
+
+vkr-dma-heap.patch: Venus host-visible memory from a Linux dma-heap, for hosts whose Vulkan driver exports no dma-buf and that have no gbm
+or udmabuf. Written from a specification (see x400/CREDITS.md for how), over virglrenderer's MIT files src/venus/vkr_device_memory.c,
+vkr_physical_device.c and vkr_physical_device.h (Copyright 2020 Google LLC, SPDX MIT), whose notices stay in those files.
+The environment variable that overrides the heap node is VKR_DMA_HEAP_NODE (default /dev/dma_heap/system).
