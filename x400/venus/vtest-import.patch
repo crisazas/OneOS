@@ -1,0 +1,139 @@
+diff -ruN a/vtest/vtest.h b/vtest/vtest.h
+--- a/vtest/vtest.h	2026-11-22 16:18:59.376148629 -0600
++++ b/vtest/vtest.h	2026-11-22 16:18:59.377376499 -0600
+@@ -96,6 +96,7 @@
+ int vtest_sync_wait(uint32_t length_dw);
+ 
+ int vtest_submit_cmd2(uint32_t length_dw);
++int vtest_resource_import_fd(uint32_t length_dw);
+ 
+ void vtest_set_max_length(uint32_t length);
+ 
+diff -ruN a/vtest/vtest_protocol.h b/vtest/vtest_protocol.h
+--- a/vtest/vtest_protocol.h	2026-11-22 16:18:59.376176643 -0600
++++ b/vtest/vtest_protocol.h	2026-11-22 16:18:59.377403429 -0600
+@@ -82,6 +82,14 @@
+ #define VCMD_SYNC_WRITE 22
+ #define VCMD_SYNC_WAIT 23
+ #define VCMD_SUBMIT_CMD2 24
++
++/* linux-x400: import a dma-buf the guest owns (it came from outside, e.g. a GBM buffer) as a resource Venus can use.
++ * The request carries the dma-buf fd as SCM_RIGHTS on its last byte; resp: res_id */
++#define VCMD_RESOURCE_IMPORT_FD 25
++#define VCMD_RES_IMPORT_FD_SIZE 3
++#define VCMD_RES_IMPORT_FD_TYPE 0 /* VCMD_BLOB_FD_DMABUF */
++#define VCMD_RES_IMPORT_FD_SIZE_LO 1
++#define VCMD_RES_IMPORT_FD_SIZE_HI 2
+ #endif /* VIRGL_RENDERER_UNSTABLE_APIS */
+ 
+ #define VCMD_RES_CREATE_SIZE 10
+diff -ruN a/vtest/vtest_renderer.c b/vtest/vtest_renderer.c
+--- a/vtest/vtest_renderer.c	2026-11-22 16:18:59.376198980 -0600
++++ b/vtest/vtest_renderer.c	2026-11-22 16:18:59.377426484 -0600
+@@ -417,6 +417,28 @@
+     return 0;
+ }
+ 
++/* linux-x400: the other half of vtest_send_fd, for a client that hands the server a dma-buf */
++static int vtest_receive_fd(int socket_fd)
++{
++    char buf[CMSG_SPACE(sizeof(int))];
++    char c;
++    struct iovec iovec = { .iov_base = &c, .iov_len = 1 };
++    struct msghdr msgh = { 0 };
++    memset(buf, 0, sizeof(buf));
++    msgh.msg_iov = &iovec;
++    msgh.msg_iovlen = 1;
++    msgh.msg_control = buf;
++    msgh.msg_controllen = sizeof(buf);
++
++    if (recvmsg(socket_fd, &msgh, MSG_CMSG_CLOEXEC) < 0)
++        return -errno;
++    struct cmsghdr *cmsg = CMSG_FIRSTHDR(&msgh);
++    if (!cmsg || cmsg->cmsg_level != SOL_SOCKET || cmsg->cmsg_type != SCM_RIGHTS ||
++        cmsg->cmsg_len != CMSG_LEN(sizeof(int)))
++        return -EINVAL;
++    return *((int *) CMSG_DATA(cmsg));
++}
++
+ int vtest_buf_read(struct vtest_input *input, void *buf, int size)
+ {
+    struct vtest_buffer *inbuf = input->data.buffer;
+@@ -1230,6 +1252,66 @@
+    return 0;
+ }
+ 
++/* linux-x400: VCMD_RESOURCE_IMPORT_FD. A dma-buf made outside Venus (KWin's GBM buffers) becomes a resource Venus can import as
++ * VkDeviceMemory: the guest's vkAllocateMemory with a dma-buf asks for this, then VkImportMemoryResourceInfoMESA names the id. */
++int vtest_resource_import_fd(UNUSED uint32_t length_dw)
++{
++   struct vtest_context *ctx = vtest_get_current_context();
++   uint32_t buf[VCMD_RES_IMPORT_FD_SIZE];
++   uint32_t resp_buf[VTEST_HDR_SIZE + 1];
++   struct virgl_renderer_resource_import_blob_args args;
++   struct vtest_resource *res;
++   int fd, ret;
++
++   ret = ctx->input->read(ctx->input, buf, sizeof(buf));
++   if (ret != sizeof(buf))
++      return -1;
++
++   fd = vtest_receive_fd(ctx->input->data.fd);
++   if (fd < 0)
++      return report_failed_call("vtest_receive_fd", fd);
++
++   uint64_t size = buf[VCMD_RES_IMPORT_FD_SIZE_LO] | ((uint64_t)buf[VCMD_RES_IMPORT_FD_SIZE_HI] << 32);
++   if (!size) {
++      off_t end = lseek(fd, 0, SEEK_END);
++      size = end > 0 ? (uint64_t)end : 0;
++   }
++
++   res = vtest_new_resource(0);
++   if (!res) {
++      close(fd);
++      return -ENOMEM;
++   }
++
++   memset(&args, 0, sizeof(args));
++   args.res_handle = res->res_id;
++   args.blob_mem = VIRGL_RENDERER_BLOB_MEM_HOST3D;
++   args.fd_type = VIRGL_RENDERER_BLOB_FD_TYPE_DMABUF;
++   args.fd = fd; /* the resource takes the fd */
++   args.size = size;
++
++   ret = virgl_renderer_resource_import_blob(&args);
++   if (ret) {
++      close(fd);
++      vtest_unref_resource(res);
++      return report_failed_call("virgl_renderer_resource_import_blob", ret);
++   }
++
++   virgl_renderer_ctx_attach_resource(ctx->ctx_id, res->res_id);
++
++   resp_buf[VTEST_CMD_LEN] = 1;
++   resp_buf[VTEST_CMD_ID] = VCMD_RESOURCE_IMPORT_FD;
++   resp_buf[VTEST_CMD_DATA_START] = res->res_id;
++   ret = vtest_block_write(ctx->out_fd, resp_buf, sizeof(resp_buf));
++   if (ret < 0) {
++      vtest_unref_resource(res);
++      return ret;
++   }
++
++   util_hash_table_set(ctx->resource_table, intptr_to_pointer(res->res_id), res);
++   return 0;
++}
++
+ int vtest_resource_unref(UNUSED uint32_t length_dw)
+ {
+    struct vtest_context *ctx = vtest_get_current_context();
+diff -ruN a/vtest/vtest_server.c b/vtest/vtest_server.c
+--- a/vtest/vtest_server.c	2026-11-22 16:18:59.376074271 -0600
++++ b/vtest/vtest_server.c	2026-11-22 16:18:59.377298914 -0600
+@@ -680,6 +680,7 @@
+    [VCMD_SYNC_WRITE]            = { vtest_sync_write,            true },
+    [VCMD_SYNC_WAIT]             = { vtest_sync_wait,             true },
+    [VCMD_SUBMIT_CMD2]           = { vtest_submit_cmd2,           true },
++   [VCMD_RESOURCE_IMPORT_FD]    = { vtest_resource_import_fd,    true },
+ };
+ 
+ static int vtest_client_dispatch_commands(struct vtest_client *client)

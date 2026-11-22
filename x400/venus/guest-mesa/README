@@ -1,0 +1,4 @@
+linux-x400: patch for Mesa 26.0.8's src/virtio/vulkan/vn_renderer_vtest.c (the Venus driver of the guest, MIT).
+Adds create_from_dma_buf over the vtest command VCMD_RESOURCE_IMPORT_FD (server side: x400/venus/vtest-import.patch) and
+sets has_dma_buf_import. The patch also needs VCMD_RESOURCE_IMPORT_FD* from vtest_protocol.h (same patch, vtest side) in Mesa's
+src/virtio/vtest/vtest_protocol.h.

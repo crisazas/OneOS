@@ -13,10 +13,11 @@ What this branch took from it, file by file. "Written here" means that no text w
 
 | Here | From OneiOS | How | Terms in OneiOS's file |
 | --- | --- | --- | --- |
-| `x400/display/X400Display.java`, `x400/display/jni.c` | `runtime/display/java/OneiOSDisplay.java`, `runtime/display/src/jni.c` | The way a layer above One UI is made without system_server: a parentless `SurfaceControl` BLAST layer by reflection, a `BLASTBufferQueue`, and rows copied into the window with `ANativeWindow_lock`. Written here, much smaller (a file instead of its socket protocol). | `SPDX-License-Identifier: MIT` |
+| `x400/display/X400Display.java`, `x400/display/jni.c` | `runtime/display/java/OneiOSDisplay.java`, `runtime/display/src/jni.c` | The way a layer above One UI is made without system_server: a parentless `SurfaceControl` BLAST layer by reflection, a `BLASTBufferQueue`, rows copied into the window with `ANativeWindow_lock`, and the panel powered on through `DisplayControl` and `setDisplayPowerMode` when no framework is left (OneiOS's `powerOn()`). Written here, much smaller (a file instead of its socket protocol). | `SPDX-License-Identifier: MIT` |
 | `x400/venus/build.sh`, `x400/venus/stub/` | `runtime/venus/build-host.sh`, `build-probe.sh`, `stub/` | The list of virglrenderer sources and compiler flags that build the Venus core (`src/venus/vkr_*`) with the NDK and no meson or epoxy. Adapted. | none in the file (see below) |
 | `x400/venus/vkr-dma-heap.patch` (ours, MIT) | the idea of `runtime/venus/virglrenderer-dma-heap.patch` | Serving host-visible memory from `/dev/dma_heap/system` where Samsung's driver exports no dma-buf. **Not a copy:** rewritten from a specification (below). | n/a |
 | `x400/venus/vtest-x400.patch` (ours, MIT) | nothing | Only touches virglrenderer's vtest files. | n/a |
+| `x400/venus/vtest-import.patch` and `x400/venus/guest-mesa/` (ours; MIT like the files they patch) | nothing | `VCMD_RESOURCE_IMPORT_FD` (a dma-buf the guest owns becomes a Venus resource) in virglrenderer's vtest server and in Mesa's `vn_renderer_vtest.c`. Written here from virglrenderer's `virgl_renderer_resource_import_blob` and Mesa's own vtest/virtgpu code; OneiOS's Mesa (`external/mesa-droidvm`) was looked at only to see that it also leaves `create_from_dma_buf` empty on vtest, and nothing of it was used. | n/a |
 | the Venus approach as a whole | `docs/gpu.md`, `runtime/venus/venus-host.c` | Using virglrenderer's Venus core on top of Samsung's Vulkan as the host side of the GPU. | `venus-host.c`: `SPDX-License-Identifier: MIT` |
 
 ### Licensing of OneiOS: what was checked (2026-11-22)
@@ -61,6 +62,10 @@ KDE Plasma 6 and KWin (GPL/LGPL, <https://kde.org>), PipeWire and WirePlumber (M
 descriptions (from `plasma-wayland-protocols`, installed in the image and not copied here).
 
 ## OneOS, OneLineage
+
+`x400/oneos/guest_prepare.sh` and `x400/oneos/guest_start.sh` are this branch's Linux versions of OneOS's two guest scripts; the loop attach and
+mount, the composer restart before the guest's own surfaceflinger, and the watcher's "SurfaceFlinger PID" and "Home activated" marks follow OneOS's.
+OneOS's own scripts (`switcher/assets/`) run unchanged.
 
 The session and return scripts that the Linux guest runs under are OneOS's, which started from WeWaffles' OneLineage (see `../CREDITS.md`
 for its terms: they permit OneOS's publication, not reuse of the OneLineage-derived files elsewhere).

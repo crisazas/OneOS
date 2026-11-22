@@ -1,0 +1,117 @@
+--- a/src/virtio/vulkan/vn_renderer_vtest.c	2026-11-22 16:25:51.316034405 -0600
++++ b/src/virtio/vulkan/vn_renderer_vtest.c	2026-11-22 16:25:51.316941678 -0600
+@@ -349,6 +349,51 @@
+    return res_id;
+ }
+ 
++/* linux-x400: VCMD_RESOURCE_IMPORT_FD. Hands the server a dma-buf made outside Venus (a GBM buffer: KWin's, Zink's) and gets back
++ * a resource id the renderer side can import as VkDeviceMemory. The fd rides on one extra byte as SCM_RIGHTS. */
++static uint32_t
++vtest_vcmd_resource_import_fd(struct vtest *vtest, int fd, VkDeviceSize size)
++{
++   uint32_t vtest_hdr[VTEST_HDR_SIZE];
++   uint32_t vcmd[VCMD_RES_IMPORT_FD_SIZE];
++
++   vtest_hdr[VTEST_CMD_LEN] = VCMD_RES_IMPORT_FD_SIZE;
++   vtest_hdr[VTEST_CMD_ID] = VCMD_RESOURCE_IMPORT_FD;
++   vcmd[VCMD_RES_IMPORT_FD_TYPE] = 0;
++   vcmd[VCMD_RES_IMPORT_FD_SIZE_LO] = (uint32_t)size;
++   vcmd[VCMD_RES_IMPORT_FD_SIZE_HI] = (uint32_t)(size >> 32);
++
++   vtest_write(vtest, vtest_hdr, sizeof(vtest_hdr));
++   vtest_write(vtest, vcmd, sizeof(vcmd));
++
++   char cmsg_buf[CMSG_SPACE(sizeof(int))];
++   char dummy = 0;
++   memset(cmsg_buf, 0, sizeof(cmsg_buf));
++   struct msghdr msg = {
++      .msg_iov = &(struct iovec){ .iov_base = &dummy, .iov_len = sizeof(dummy) },
++      .msg_iovlen = 1,
++      .msg_control = cmsg_buf,
++      .msg_controllen = sizeof(cmsg_buf),
++   };
++   struct cmsghdr *cmsg = CMSG_FIRSTHDR(&msg);
++   cmsg->cmsg_level = SOL_SOCKET;
++   cmsg->cmsg_type = SCM_RIGHTS;
++   cmsg->cmsg_len = CMSG_LEN(sizeof(int));
++   *((int *)CMSG_DATA(cmsg)) = fd;
++   if (sendmsg(vtest->sock_fd, &msg, 0) < 0) {
++      vn_log(vtest->instance, "sendmsg failed: %s", strerror(errno));
++      abort();
++   }
++
++   vtest_read(vtest, vtest_hdr, sizeof(vtest_hdr));
++   assert(vtest_hdr[VTEST_CMD_LEN] == 1);
++   assert(vtest_hdr[VTEST_CMD_ID] == VCMD_RESOURCE_IMPORT_FD);
++
++   uint32_t res_id;
++   vtest_read(vtest, &res_id, sizeof(res_id));
++   return res_id;
++}
++
+ static void
+ vtest_vcmd_resource_unref(struct vtest *vtest, uint32_t res_id)
+ {
+@@ -778,6 +823,44 @@
+    return VK_SUCCESS;
+ }
+ 
++static VkResult
++vtest_bo_create_from_dma_buf(struct vn_renderer *renderer,
++                             VkDeviceSize size,
++                             int fd,
++                             VkMemoryPropertyFlags flags,
++                             struct vn_renderer_bo **out_bo)
++{
++   struct vtest *vtest = (struct vtest *)renderer;
++   const uint32_t blob_flags =
++      vtest_bo_blob_flags(flags, VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT);
++
++   int res_fd = os_dupfd_cloexec(fd);
++   if (res_fd < 0)
++      return VK_ERROR_INVALID_EXTERNAL_HANDLE;
++
++   mtx_lock(&vtest->sock_mutex);
++   uint32_t res_id = vtest_vcmd_resource_import_fd(vtest, fd, size);
++   mtx_unlock(&vtest->sock_mutex);
++   if (!res_id) {
++      close(res_fd);
++      return VK_ERROR_INVALID_EXTERNAL_HANDLE;
++   }
++
++   struct vtest_bo *bo = util_sparse_array_get(&vtest->bo_array, res_id);
++   *bo = (struct vtest_bo){
++      .base = {
++         .refcount = VN_REFCOUNT_INIT(1),
++         .res_id = res_id,
++         .mmap_size = size,
++      },
++      .res_fd = res_fd,
++      .blob_flags = blob_flags,
++   };
++
++   *out_bo = &bo->base;
++   return VK_SUCCESS;
++}
++
+ static void
+ vtest_shmem_destroy_now(struct vn_renderer *renderer,
+                         struct vn_renderer_shmem *_shmem)
+@@ -930,7 +1013,7 @@
+    info->pci.vendor_id = VTEST_PCI_VENDOR_ID;
+    info->pci.device_id = VTEST_PCI_DEVICE_ID;
+ 
+-   info->has_dma_buf_import = false;
++   info->has_dma_buf_import = true;
+    info->has_external_sync = false;
+    info->has_implicit_fencing = false;
+ 
+@@ -1070,7 +1153,7 @@
+ 
+    vtest->base.bo_ops.create_from_device_memory =
+       vtest_bo_create_from_device_memory;
+-   vtest->base.bo_ops.create_from_dma_buf = NULL;
++   vtest->base.bo_ops.create_from_dma_buf = vtest_bo_create_from_dma_buf;
+    vtest->base.bo_ops.destroy = vtest_bo_destroy;
+    vtest->base.bo_ops.export_dma_buf = vtest_bo_export_dma_buf;
+    vtest->base.bo_ops.export_sync_file =
