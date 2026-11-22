@@ -1,0 +1,34 @@
+--- a/vtest/vtest_server.c
++++ b/vtest/vtest_server.c
+@@ -269,7 +269,8 @@
+    }
+ 
+    if (server.venus) {
+-      server.ctx_flags |= VIRGL_RENDERER_VENUS;
++      /* linux-x400: no GL on the host side; Venus only (vrend is stubbed out) */
++      server.ctx_flags = VIRGL_RENDERER_VENUS | VIRGL_RENDERER_NO_VIRGL | VIRGL_RENDERER_ASYNC_FENCE_CB;
+    }
+    if (server.render_server) {
+       server.ctx_flags |= VIRGL_RENDERER_RENDER_SERVER;
+--- a/vtest/vtest_renderer.c
++++ b/vtest/vtest_renderer.c
+@@ -2062,16 +2062,17 @@
+       struct vtest_timeline *timeline = &ctx->timelines[batch->ring_idx];
+ 
+       submit->timeline = timeline;
++      /* linux-x400: Venus retires a ring 0 fence inside create_fence, so the submit must already be on the timeline */
++      list_addtail(&submit->head, &timeline->submits);
+       ret = virgl_renderer_context_create_fence(ctx->ctx_id,
+                                                 VIRGL_RENDERER_FENCE_FLAG_MERGEABLE,
+                                                 batch->ring_idx,
+                                                 (uintptr_t)submit);
+       if (ret) {
++         list_del(&submit->head);
+          vtest_free_timeline_submit(submit);
+          return ret;
+       }
+-
+-      list_addtail(&submit->head, &timeline->submits);
+    }
+ 
+    return 0;

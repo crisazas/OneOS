@@ -16,3 +16,6 @@ __pycache__/
 # Generated guest manager APK; build with scripts/build-guest-manager.sh.
 switcher/assets/guest_manager.apk
 /out
+x400/test/vk-offscreen
+x400/test/tri_*.h
+x400/display/bin/
