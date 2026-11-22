@@ -1,3 +1,5 @@
+// Credit: the window copy follows OneiOS's runtime/display/src/jni.c (MIT), by Akshay CM (akshaynexus), Musicalista and contributors,
+// https://github.com/Musicalista/OneiOS-A56. Written here, not copied. See x400/CREDITS.md.
 // linux-x400: liboneios-style native half of X400Display: maps the frame file and copies each new frame into the layer.
 #define _GNU_SOURCE
 #include "fb.h"

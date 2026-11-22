@@ -1,3 +1,6 @@
+// Credit: the way a layer above One UI is made without system_server (a parentless SurfaceControl BLAST layer by reflection, a BLASTBufferQueue)
+// follows OneiOS's runtime/display/java/OneiOSDisplay.java (MIT), by Akshay CM (akshaynexus), Musicalista and contributors,
+// https://github.com/Musicalista/OneiOS-A56. Written here, not copied. See x400/CREDITS.md.
 // linux-x400: shows the frames a Linux guest writes into a shared file on a SurfaceControl layer above One UI.
 // Run by app_process (display.sh); only surfaceflinger has to be running. Every android.* class is reached by
 // reflection (the pattern of the OneOS fork's OneOSBootStatus and of OneiOS's display helper), so it builds with a JDK

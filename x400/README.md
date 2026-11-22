@@ -4,6 +4,8 @@ A Linux desktop that runs as a chroot on One UI's own kernel (5.15), with One UI
 Root is KernelSU/DFroot (lives in RAM: a reboot loses it). Everything the session mounts lives in a private mount namespace
 (`busybox unshare -m`), so One UI never sees it and it disappears when the session ends.
 
+See [CREDITS.md](CREDITS.md): this branch builds on OneOS, and on OneiOS (Akshay CM, Musicalista and contributors) for the display layer and the Venus build.
+
 ## How a frame reaches the panel
 `kwin_wayland --virtual` (Plasma 6.6.7, llvmpipe) -> `zkde_screencast` -> PipeWire (+ wireplumber) -> `capture` -> a shared file
 (`fb.h`) -> `X400Display` (a `SurfaceControl` layer made from `app_process`, above One UI). Touch: `/dev/input/event8` ->
@@ -18,11 +20,21 @@ outside the chroot) -> Samsung's Vulkan on the Mali-G68.
   `x400/venus/vtest-x400.patch`).
 - `x400/display/build.sh` -> `out/display/{x400-display.dex,libx400display.so}`.
 
-## Run (on the tablet, as root)
-Push to `/data/local/tmp`: `x400-plasma.ext4` (then `chcon u:object_r:apex_data_file:s0` it: the loop's kernel thread cannot read `shell_data_file`),
-`x400vt` (the vtest server), `capture`, `inputd`, `x400-display.dex`, `libx400display.so`, `display.sh`, `plasma.sh`, `session-inner.sh`, `run-desktop.sh`.
-`sh /data/local/tmp/run-desktop.sh 120` starts the session for 120 s, shows it, and cleans up. `TAP="x y"` injects a touch (portrait coordinates).
-`GPUTEST='cmd'` runs a command inside the session. The side keys (event0..event4) are never opened.
+## Run (OneOS's shape: preflight, session, way back)
+`x400/phone/deploy.sh` (PC, adb) stages everything in `/data/local/tmp/oneos-x400` (separate from OneOS's own `/data/local/tmp/oneos`;
+deleting it removes it all) and pins the files in `stage.sha256`; the session refuses to start if one changed. The image gets
+`chcon u:object_r:apex_data_file:s0` (the loop's kernel thread cannot read `shell_data_file`). `--no-image` re-stages only the scripts.
+
+On the tablet, as root:
+- `sh /data/local/tmp/oneos-x400/x400_switch.sh [--seconds N] [--cmd 'command inside the chroot']`: preflight first (root, busybox applets,
+  staged sums, no session already running, nothing of the stage mounted in init's namespace, MemAvailable >= 1500 MiB, `/dev/dma_heap/system`,
+  Samsung's `libvulkan.so`, a volume-key device); then the session in its own mount namespace, the display layer, and a watcher.
+  With `SHOT=/path.png` it also takes a `screencap` 12 s after the first frame. `--seconds 0` runs until the way back.
+- Way back: `sh /data/local/tmp/oneos-x400/x400_return.sh`, or hold **Volume Up + Volume Down for 3 s** (`x400_keywatch.sh` only reads the key
+  devices, never grabs them). The return removes the layer, kills every process whose root is the chroot (it shares Android's PID namespace;
+  `inputd` dying gives the touchscreen back), stops the Venus server, restores the stay-on setting, and checks and writes
+  `return.outcome`: no chroot process, no stage mount in init, no loop device, init's mount count as before. It is safe to run twice or with no session.
+- One UI keeps running the whole time; the side keys (event0..event4) are never opened for input.
 
 ## Facts that cost time
 - `VN_DEBUG=vtest` is mandatory (without it Mesa tries the real DRM node first and finds no GPU) and `VN_PERF=no_fence_feedback` too (with

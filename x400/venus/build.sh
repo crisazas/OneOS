@@ -1,4 +1,6 @@
 #!/bin/sh
+# Credit: the source list and flags are adapted from OneiOS's runtime/venus/build-host.sh (Akshay CM / akshaynexus, Musicalista and
+# contributors, https://github.com/Musicalista/OneiOS-A56; no license line in that file). See x400/CREDITS.md.
 # Builds virgl_test_server --venus for Android arm64 (bionic) with the NDK, without GL: the fork's vtest server and
 # src/virglrenderer.c over the Venus core (src/venus/vkr_*); vrend/drm/proxy are stubs (vrend_stub.c).
 # Inputs (git-ignored): out/virgl (virglrenderer 7e17c8e + virglrenderer-dma-heap.patch), out/venus-src (stub/ of runtime/venus).
