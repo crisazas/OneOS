@@ -42,6 +42,7 @@ What this branch took from it, file by file. "Written here" means that no text w
 - **Checked on the tablet** (SM-X400, One UI running, no session): the triangle test (`x400/test/vk-offscreen.c`, 500 frames) gives the same pixels
   (center 255 128 0 255, corner 26 51 230 255) with both servers; 1099 fps with OneiOS's patch, 1113 fps with ours.
 - Whether that is enough to publish is the owner's call; if in doubt, ask OneiOS's authors, or write the 55 lines again with a person who has not seen them.
+  **Decision (owner, 2026-11-22): this branch keeps its own patch (`x400/venus/vkr-dma-heap.patch`).**
 - The `virglrenderer` that OneiOS builds is the fork of Droid-VM (<https://github.com/Droid-VM/virglrenderer>, `7e17c8e`, commits by HuJK).
   Upstream-inherited files (the `vkr_*` core) stay MIT; what Droid-VM wrote is GPL-2.0-or-later with additional permissions
   (`LICENSING.md`, `ADDITIONAL-PERMISSIONS` there), except `drm2kgsl_renderer.{c,h}` (MIT).

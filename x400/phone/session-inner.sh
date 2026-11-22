@@ -34,6 +34,12 @@ if [ -n "$GPUTEST" ]; then
   echo "== GPU test: $GPUTEST"
   VN_PERF=no_fence_feedback timeout 40 sh -c "$GPUTEST" > /tmp/gpu.log 2>&1; echo "rc=$?"; tail -n 14 /tmp/gpu.log | cut -c1-170
 fi
-echo "== cpu (kwin, plasmashell, capture, inputd)"; top -b -n 1 2>/dev/null | head -n 14 | tail -n 8
+if [ -f /tmp/fb/load.sh ]; then
+  echo "== load: $(head -n 3 /tmp/fb/load.sh | tr '\n' ';')"
+  WAYLAND_DISPLAY=wayland-x400 QT_QPA_PLATFORM=wayland sh /tmp/fb/load.sh > /tmp/load.log 2>&1 &
+  sleep 8
+fi
+echo "== cpu over 10 s"; sh /tmp/cpu-sample.sh 10
+echo "== capture (seq of the shared frame: $(od -A n -t u8 -j 32 -N 8 /tmp/fb/fb.bin | tr -d " "))"; grep -E "frames" /tmp/capture.log | tail -n 3
 echo "== inputd.log"; cat /tmp/inputd.log
 echo "== capture.log"; tail -n 8 /tmp/capture.log; echo "== kwin screencast"; grep -i -E "screencast|stream|format|dmabuf" /tmp/kwin.log | head -20

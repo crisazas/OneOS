@@ -193,3 +193,14 @@ Limpieza: el chroot comparte el espacio de PIDs con Android; `plasma.sh` mata so
 - **GPU en la composición:** KWin usa llvmpipe (CPU). Venus solo sirve a apps Vulkan. Zink exigiría `maintenance5` y `robustness2`, que Venus no expone.
 - **Entrada táctil:** `x400/display/inputd.c` escrito y compilado (aarch64); primera prueba en curso (toque inyectado con `sendevent`).
 - **Estabilidad y fps:** sin medir en una sesión larga. Faltan fps reales, CPU y calor.
+
+---
+## Decisiones del propietario (2026-11-22)
+- **Se para One UI**, como hace OneOS: el huésped Linux se arranca y se devuelve con el flujo de OneOS (parada del framework, teclas Vol+/Vol-, vigilante, retorno), no con mis scripts `x400_switch.sh`/`x400_return.sh`, que quedan como andamio.
+- **Se queda el parche propio de dma-heap** (`x400/venus/vkr-dma-heap.patch`, MIT), ya medido igual de bueno que el de OneiOS.
+- **Prueba con dedo real (primera):** el escritorio se ve, el táctil responde y el toque cae donde se pone el dedo (rotación y escala de `inputd` correctas a 2112x1320).
+  One UI seguía respondiendo al tacto aunque `inputd` dijo haber tomado `event8` con `EVIOCGRAB`: **sin explicar** (el log no dio error). Con One UI parado no importa.
+### Medido el mismo día (llvmpipe, sin GPU en la composición)
+- Escritorio quieto: 4,6 fps de captura en 50 s (solo el arranque). Con un `konsole` desplazando texto: 5,8 fps, `kwin_wayland` 31 % de un núcleo (8 núcleos), `konsole` 3,9 %, `capture` 0,5 %.
+  La CPU total está casi libre, así que el límite no es la CPU global: pendiente mirar `Cpus_allowed`/cpuset, el gobernador, los hilos de KWin y `/dev/pts` en el chroot (medición en curso).
+- Zink no arranca: el Vulkan de Samsung no ofrece `VK_EXT_robustness2` (102 extensiones) y Zink exige `nullDescriptor` (`zink_screen.c:3458`).
