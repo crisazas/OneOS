@@ -14,13 +14,27 @@ What this branch took from it, file by file. "Written here" means that no text w
 | Here | From OneiOS | How | Terms in OneiOS's file |
 | --- | --- | --- | --- |
 | `x400/display/X400Display.java`, `x400/display/jni.c` | `runtime/display/java/OneiOSDisplay.java`, `runtime/display/src/jni.c` | The way a layer above One UI is made without system_server: a parentless `SurfaceControl` BLAST layer by reflection, a `BLASTBufferQueue`, and rows copied into the window with `ANativeWindow_lock`. Written here, much smaller (a file instead of its socket protocol). | `SPDX-License-Identifier: MIT` |
-| `x400/venus/build.sh`, `x400/venus/stub/` | `runtime/venus/build-host.sh`, `build-probe.sh`, `stub/` | The list of virglrenderer sources and compiler flags that build the Venus core (`src/venus/vkr_*`) with the NDK and no meson or epoxy. Adapted. | none in the file |
+| `x400/venus/build.sh`, `x400/venus/stub/` | `runtime/venus/build-host.sh`, `build-probe.sh`, `stub/` | The list of virglrenderer sources and compiler flags that build the Venus core (`src/venus/vkr_*`) with the NDK and no meson or epoxy. Adapted. | none in the file (see below) |
 | `x400/venus/vtest-x400.patch`, and the server built from it | `runtime/venus/virglrenderer-dma-heap.patch` | Our patch applies on top of OneiOS's patch, which gives host-visible memory from `/dev/dma_heap/system` where Samsung's driver exports no dma-buf. The patch itself is not copied into this repository: `x400/venus/build.sh` expects it in `out/virgl`. | **none in the file** (see below) |
 | the Venus approach as a whole | `docs/gpu.md`, `runtime/venus/venus-host.c` | Using virglrenderer's Venus core on top of Samsung's Vulkan as the host side of the GPU. | `venus-host.c`: `SPDX-License-Identifier: MIT` |
 
-OneiOS's own README says the project is derived from the Apple Public Source License 2.0 (`LICENSE.APSL`) and MIT (`LICENSE`).
-Its repository has no top-level license file in the revision read, so each file's own header is what was followed. **The dma-heap patch has no
-license line**: its terms are unknown to the author of this branch, and it must not be redistributed from this repository until its authors say.
+### Licensing of OneiOS: what was checked (2026-11-22)
+
+- OneiOS has **no license file**. The README of `akshaynexus/OneiOS` says "No license file yet - all rights reserved until the owner adds one"
+  (the same text is in the revision read, `f95de4b`). The README of the fork `Musicalista/OneiOS-A56` says "Derived from the Apple Public Source
+  License 2.0 (`LICENSE.APSL`) and MIT (`LICENSE`)", but both files return 404 on GitHub: the statement has no file behind it.
+- So only what carries its own header is licensed: `OneiOSDisplay.java` and `venus-host.c` have `SPDX-License-Identifier: MIT`.
+  `runtime/venus/build-host.sh` and `virglrenderer-dma-heap.patch` have no license line.
+- **The dma-heap patch** changes `src/venus/vkr_device_memory.c`, `vkr_physical_device.c` and `vkr_physical_device.h`, which are
+  `Copyright 2020 Google LLC, SPDX MIT`, and adds about 55 lines whose author and terms are not stated anywhere. MIT lets the patched files
+  be used and redistributed with their notice; it says nothing about the new lines. **This branch does not contain the patch and must not
+  redistribute it until its author says under which terms it is published.** Using it on one's own machine is not in question.
+  The author of those lines could not be determined (in OneiOS it is a bare file without history).
+- The `virglrenderer` that OneiOS builds is the fork of Droid-VM (<https://github.com/Droid-VM/virglrenderer>, `7e17c8e`, commits by HuJK).
+  Upstream-inherited files (the `vkr_*` core) stay MIT; what Droid-VM wrote is GPL-2.0-or-later with additional permissions
+  (`LICENSING.md`, `ADDITIONAL-PERMISSIONS` there), except `drm2kgsl_renderer.{c,h}` (MIT).
+- `x400/venus/vtest-x400.patch` is this branch's own work and only touches virglrenderer's vtest files (MIT upstream).
+- To remove the dependency: write the dma-heap allocation again on the MIT `vkr_*` code. Not done.
 
 ## virglrenderer and Mesa
 
