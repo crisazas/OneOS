@@ -1,0 +1,71 @@
+--- a/src/virtio/vulkan/vn_device.h
++++ b/src/virtio/vulkan/vn_device.h
+@@ -47,6 +47,9 @@
+ 
+    bool has_sync2;
+ 
++   /* linux-x400: the one sync vn_create_sync_file hangs its submit on (see vn_queue.c); created on first use */
++   struct vn_renderer_sync *x400_sync_file_sync;
++
+    simple_mtx_t mutex;
+    struct list_head chains;
+ };
+--- a/src/virtio/vulkan/vn_device.c
++++ b/src/virtio/vulkan/vn_device.c
+@@ -658,6 +658,9 @@
+ 
+    vn_device_queue_family_fini(dev);
+ 
++   if (dev->x400_sync_file_sync)
++      vn_renderer_sync_destroy(dev->renderer, dev->x400_sync_file_sync);
++
+    vn_async_vkDestroyDevice(dev->primary_ring, device, NULL);
+ 
+    /* We must emit vkDestroyDevice before releasing bound ring_idx. Otherwise,
+--- a/src/virtio/vulkan/vn_queue.c
++++ b/src/virtio/vulkan/vn_queue.c
+@@ -1874,11 +1874,24 @@
+                     struct vn_sync_payload_external *external_payload,
+                     int *out_fd)
+ {
+-   struct vn_renderer_sync *sync;
+-   VkResult result = vn_renderer_sync_create(dev->renderer, 0,
+-                                             VN_RENDERER_SYNC_BINARY, &sync);
+-   if (result != VK_SUCCESS)
+-      return vn_error(dev->instance, result);
++   /* linux-x400: the fd made below is an eventfd that is already signaled (vtest_sync_export_syncobj), unrelated to the sync, and nothing
++    * waits on the sync: it only carries the submit. Creating and destroying one per call cost a VCMD_SYNC_CREATE round trip to the server
++    * each time (~330/s, the main thread of KWin blocked ~1 ms on each). The server signals value 1 on a sync that already has it as a no-op
++    * (vtest_signal_sync), so one sync per device is shared by all calls. */
++   struct vn_renderer_sync *sync = p_atomic_read(&dev->x400_sync_file_sync);
++   if (!sync) {
++      struct vn_renderer_sync *created;
++      VkResult cr = vn_renderer_sync_create(dev->renderer, 0,
++                                            VN_RENDERER_SYNC_BINARY, &created);
++      if (cr != VK_SUCCESS)
++         return vn_error(dev->instance, cr);
++      sync = p_atomic_cmpxchg(&dev->x400_sync_file_sync, NULL, created);
++      if (!sync)
++         sync = created;
++      else
++         vn_renderer_sync_destroy(dev->renderer, created);
++   }
++   VkResult result;
+ 
+    struct vn_renderer_submit_batch batch = {
+       .syncs = &sync,
+@@ -1903,13 +1916,10 @@
+       .batch_count = 1,
+    };
+    result = vn_renderer_submit(dev->renderer, &submit);
+-   if (result != VK_SUCCESS) {
+-      vn_renderer_sync_destroy(dev->renderer, sync);
++   if (result != VK_SUCCESS)
+       return vn_error(dev->instance, result);
+-   }
+ 
+    *out_fd = vn_renderer_sync_export_syncobj(dev->renderer, sync, true);
+-   vn_renderer_sync_destroy(dev->renderer, sync);
+ 
+    return *out_fd >= 0 ? VK_SUCCESS : VK_ERROR_TOO_MANY_OBJECTS;
+ }
