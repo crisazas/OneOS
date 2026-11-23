@@ -77,7 +77,10 @@ OneOS's own scripts (`switcher/assets/`, `oneos_switch.sh`) do the preflight, st
   Measured on 2026-11-23: files in `/root` and `/etc`, a script in `/usr/local/bin` and `apt-get install tree` survived returning to One UI and starting the session again; `e2fsck -n` after the return: clean.
   `X400_PERSIST=0` gives the old read-only root with nothing kept. If the layer cannot be mounted, `guest_prepare.sh` says so and falls back to that. `deploy.sh` writes `rootfs.id` (the image's sha256) and the layer keeps it: a layer made over
   another image is not used (it would hide the new image's files); `sh /data/local/tmp/oneos/persist-reset.sh` (One UI up) moves it aside to `persist.img.old-<epoch>` and the next session starts a clean one.
-  **Not tested:** a reboot of the tablet or any other abrupt cut with the layer mounted, the refusal after the image changed, and the frame rate with the overlay (the fps above were measured without it).
+  Frame rate with the overlay (2026-11-23, 3 interleaved runs per case, the real helper, same `capture`, `capture` restarted at each mode; `X400_PERSIST=0` for the case without it), frames shown:
+  with the overlay **63.5 fps at 90 Hz and 80.2 at 120 Hz**; without it, in the same kind of fresh session, 65.3 and 82.4. The overlay costs ~2 fps (~3 %), but the ranges almost touch at 90 Hz (62.4-65.2 against 64.6-66.0), so it is a small effect and not a firm one.
+  A fresh session was already 4-6 fps below the one measured hours before (69.4 and 88.8, no overlay): the cause is not known (not isolated: the hardware groups, heat and background load all differ).
+  **Not tested:** a reboot of the tablet or any other abrupt cut with the layer mounted, the refusal after the image changed, and how the cost grows when the layer holds much more than the ~290 MB it had.
 - Way back: hold **Volume Up + Volume Down for 3 s**, or `setprop oneos.guest.powerctl app:x400`. OneOS restores One UI in place and checks it (`auto_return.log`).
   If the guest cannot be prepared, the switch returns to One UI by itself (it did once with `losetup` not finding `system.raw`; the same command worked a minute later).
 - A reboot loses root (DFroot) and the session; the stage under `/data/local/tmp/oneos` survives it.
