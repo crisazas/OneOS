@@ -5,7 +5,8 @@
 set -eu
 cd "$(dirname "$0")/.."
 OUT=$PWD/out; R=$OUT/rootfs-plasma; IMG=$OUT/rootfs-plasma.ext4; SIZE=${SIZE:-6G}
-PKGS=$(cat x400/PACKAGES x400/*/PACKAGES 2>/dev/null | sed 's/#.*//' | tr -s ' \t\n' '\n' | grep -v '^$' | sort -u | tr '\n' ' ')
+# x400/NOT-IN-IMAGE lists names that a group asks for but that must not reach the guest (build-time only, or replaced by another design)
+PKGS=$(cat x400/PACKAGES x400/*/PACKAGES 2>/dev/null | sed 's/#.*//' | tr -s ' \t\n' '\n' | grep -v '^$' | sort -u | grep -v -x -F -f x400/NOT-IN-IMAGE 2>/dev/null | tr '\n' ' ')
 [ -n "$PKGS" ] || { echo "no packages listed"; exit 1; }
 umnt() { for m in dev sys proc; do mountpoint -q "$R/$m" && { sudo mount --make-rslave "$R/$m"; sudo umount -R "$R/$m"; }; done; return 0; }
 trap umnt EXIT
