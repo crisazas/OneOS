@@ -26,6 +26,16 @@ The desktop is drawn by the tablet's GPU, not by llvmpipe. Measured on the table
 - **Not measured:** a long session (hours), heat, battery, more than two simultaneous GPU clients, and the picture with anything other than `es2gears` and the desktop itself.
   The panel was looked at by eye (orientation, colours, no cuts or artefacts); no automated image check was made.
 
+## The tablet's hardware in the Linux session
+Everything below runs in the same session, started by `oneos_switch.sh` with nothing done by hand; each group has its `x400/<group>/RESULT.md` with the commands and the output.
+Wiring and the list of what no person has tested yet: [HARDWARE.md](HARDWARE.md).
+- **Input:** touch, S Pen (as a mouse: no pressure or tilt, KWin's `fake_input` has no tablet requests), side keys (volume, power = backlight) without grabbing them, on-screen keyboard (`plasma-keyboard`).
+- **Sensors and power:** accelerometer and light through `net.hadess.SensorProxy`, battery through UPower, brightness (`x400-brightness`), auto-rotation (display, `capture` and `inputd` follow KWin's output rotation).
+- **Audio:** speaker and microphone as PipeWire nodes "Altavoces" and "Microfono" over Android's `audioserver` (AAudio). Never run `dumpsys media.audio_flinger` there: it crashes `audioserver` without `system_server`.
+- **Radios:** Wi-Fi (NetworkManager with Ubuntu's `wpa_supplicant`, the network saved in One UI) and Bluetooth (`hci0` over `/dev/scsc_h4_0` through a relay); both are stopped when the way back starts.
+- **Cameras:** front and rear as PipeWire `Video/Source` nodes (`x400-camera-front`, `x400-camera-back`), opened only while a client streams.
+- **If root is lost after a reboot:** KernelSU manager -> Superuser -> show system apps -> `com.android.shell` -> Superuser on. A kernel oops from opening an ABOX capture PCM that Android's HAL holds caused one reboot: see HARDWARE.md.
+
 ## How a frame reaches the panel
 `kwin_wayland --virtual` (Plasma 6.6.7, Zink on Venus; llvmpipe only if the Zink probe fails or `X400_GPU=sw`) -> `zkde_screencast` -> PipeWire (+ wireplumber) -> `capture` ->
 (linear BGRA dma-buf, its descriptor over `FILE.sock`; shared memory copied into a file `fb.h` if the helper is not connected or KWin cannot give a dma-buf) ->
