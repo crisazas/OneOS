@@ -6,17 +6,17 @@ one file per turn, read back with an image viewer) are in `/tmp/opencode/rot/`:
 
 ## Geometry (measured, not assumed)
 - The panel is 1320x2112 natively; Android shows it landscape (surface current transform ROTATE_90, `dumpsys SurfaceFlinger`: framebufferSpace 1320x2112 ROTATION_90).
-- `screencap` is what the panel shows in that landscape view (2112x1320, or 1320x2112 portrait...): it came out 2112x1320 in `none`/`inverted` and 2112x1320 as well for left/right,
-  with the desktop sideways inside it. The taskbar edge in `screencap` (`/tmp/opencode/rot/edge.py`, the brightest 44 px strip) tells where KWin's "bottom" lands on the panel:
+- `screencap` returns 2112x1320 in all four turns (the panel's landscape view); the natural frame is that image turned 90 degrees clockwise.
+  Where KWin's taskbar (the desktop's bottom) lands in it (`/tmp/opencode/rot/edge.py`: the brightest 44 px strip), final code:
 
-  | output | KWin frame | taskbar edge in screencap, helper before | after (final) |
-  |---|---|---|---|
-  | none | 2112x1320 | bottom (right) | bottom |
-  | left | 1320x2112 | left edge, 90 deg turned | left edge: the panel's natural top is the desktop's bottom |
-  | inverted | 2112x1320 | bottom, i.e. the desktop upside down | top edge |
-  | right | 1320x2112 | right edge | right edge |
+  | output | KWin frame | taskbar edge in the screencap |
+  |---|---|---|
+  | none | 2112x1320 | bottom |
+  | left | 1320x2112 | left (the panel's natural top) |
+  | inverted | 2112x1320 | top |
+  | right | 1320x2112 | right (the panel's natural bottom) |
 
-  The "before" column is the old helper: it blitted every frame into a 2112x1320 swapchain with the corner of the frame cut off (portrait frames) and nothing turned.
+  The old helper was not screenshotted rotated (it was only seen not to handle a portrait frame: it blits `min(ext, frame)` into a fixed 2112x1320 swapchain).
 - So the tablet has to be physically held with that edge down: none = the usual landscape; left = natural top down; right = natural top up; inverted = landscape upside down.
   Upright check (`final-sheet.png`): turn each screencap so its taskbar is at the bottom and the desktop reads right, complete, no crop, no mirror, in all four.
 - **Which physical turn a posture corresponds to is the accelerometer's side (G2, `x400-sensord`), not measured here**: no one turned the tablet. Display and touch follow KWin's output rotation, whatever decides it.
@@ -51,18 +51,15 @@ Frame rate (wl-client at 120 Hz, 14 s, `/tmp/opencode/rot/fps.sh`, the old helpe
 
 Same within the noise (the old numbers of the README: 81 shown); `acquire` mean 0.15 ms, as before.
 
-Touch/pen (a uinput pen with sec_e-pen's range hovering over five fixed points of the natural frame, KWin's `workspace.cursorPos` read through a script; `/tmp/opencode/rot/rottest.c`, `rtest2.sh`),
-**one running inputd, with `--orient`, through the four orientations** written to the env file as the hook does:
-
-| posture | TL | TR | BL | BR | centre |  (points of the natural frame; got = expected)
-|---|---|---|---|---|---|
-| none 2112x1320 | 211,1187 | 211,132 | 1900,1187 | 1900,132 | 1056,660 |
-| left 1320x2112 | 1187,1900 | 132,1900 | 1187,211 | 132,211 | 660,1056 |
-| inverted 2112x1320 | 1900,132 | 1900,1187 | 211,132 | 211,1187 | 1056,660 |
-| right 1320x2112 | 132,211 | 1187,211 | 132,1900 | 1187,1900 | 660,1056 |
-
-(the samples were read while the pen cycled, so each posture shows these values in the cyclic order of the points; no other value appeared.) inputd's log:
-`orientation left: rot 1 -> 2, size 2112x1320 -> 1320x2112`, then `inverted: 2 -> 3`, `right: 3 -> 0`, `none: 0 -> 1`.
+Touch/pen (a uinput pen with sec_e-pen's range hovering over five points of the natural frame at 10 %/90 %/50 %, KWin's `workspace.cursorPos` read through a script;
+`/tmp/opencode/rot/rottest.c`, `rtest2.sh`), **one running inputd with `--orient`, through the four orientations** written to the env file as the hook does.
+The cursor was sampled while the pen cycled (not in step with the points), so the check is that every sampled position is one of the five expected points of that posture and that
+the set changes with the posture; all 6 samples of each posture were (e.g. none: 1900,1187 / 1900,132 / 1056,660 / 211,1187; left: 132,211 / 660,1056 / 1187,1900 / 132,1900).
+Expected points by the mapping (TL, TR, BL, BR of the natural frame, centre): none 211,1187 / 211,132 / 1900,1187 / 1900,132 / 1056,660; left 1187,1900 / 132,1900 / 1187,211 / 132,211 / 660,1056;
+inverted 1900,132 / 1900,1187 / 211,132 / 211,1187 / 1056,660; right 132,211 / 1187,211 / 132,1900 / 1187,1900 / 660,1056.
+inputd's log: `orientation left: rot 1 -> 2, size 2112x1320 -> 1320x2112`, then `inverted: 2 -> 3`, `right: 3 -> 0`, `none: 0 -> 1`.
+This proves inputd applies the table; that the table matches the screen is by derivation from the screencaps (upright desktop = natural frame turned 180 for left, 0 for right, 90 clockwise for inverted,
+90 counter-clockwise for none), not by a finger.
 Live inputd replaced by the new one (`--touch /dev/input/event8 --pen /dev/input/event10 --grab`): `/proc/PID/fd` shows event8 and event10 open before and after the reload, pid unchanged and
 alive after an inotify reload (file replaced) and after `kill -HUP` (file rewritten in place). Not tested: a real finger or the real S Pen in a rotated state.
 
