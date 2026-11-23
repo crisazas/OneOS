@@ -1,0 +1,4 @@
+# Merge into the guest's kwinrc (/etc/xdg/kwinrc in the image: the session's HOME is read-only).
+# plasma-keyboard talks input-method-v1 to KWin; KWin starts it itself from this key.
+[Wayland]
+InputMethod=/usr/share/applications/org.kde.plasma.keyboard.desktop
