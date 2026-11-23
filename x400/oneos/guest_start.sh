@@ -49,6 +49,11 @@ mkdir -p "$R/tmp/fb"; $BB mount --bind "$D/fb" "$R/tmp/fb"
 if [ -d "$STAGE/x400/mesa25" ]; then
     mkdir -p "$R/tmp/mesa25"; $BB mount --bind "$STAGE/x400/mesa25" "$R/tmp/mesa25" && say "Mesa 25.0.7 for Zink bound at /tmp/mesa25"
 fi
+# libvulkan_virtio with the dma-buf import (x400/venus/guest-mesa), over the rootfs's own: the image is read-only, so a bind mount
+if [ -f "$STAGE/x400/libvulkan_virtio.so" ]; then
+    VL=$(ls "$R"/usr/lib/aarch64-linux-gnu/libvulkan_virtio.so 2>/dev/null)
+    [ -n "$VL" ] && $BB mount --bind "$STAGE/x400/libvulkan_virtio.so" "$VL" && say "libvulkan_virtio with dma-buf import bound over $VL"
+fi
 for f in capture inputd session-inner.sh cpu-sample.sh; do
     : > "$R/tmp/$f"; $BB mount --bind "$STAGE/x400/$f" "$R/tmp/$f"
 done
@@ -79,8 +84,8 @@ say "surfaceflinger $SF_PID up after $((n))00 ms ($(service check SurfaceFlinger
 # No framework is left to power the panel on: ask surfaceflinger (the display helper does, with --power).
 
 # The GPU: virglrenderer's Venus server, outside the chroot, on Samsung's Vulkan, its socket inside the guest's /tmp.
-VKR_DMA_HEAP_NODE=/dev/dma_heap/system ANDROID_EMU_VK_LOADER_PATH=/system/lib64/libvulkan.so VIRGL_LOG_LEVEL=info \
-    "$STAGE/x400/x400vt" --venus --no-fork --socket-path="$R/tmp/.virgl_test" > "$D/logs/venus.log" 2>&1 &
+VKR_DMA_HEAP_NODE=${X400_DMA_HEAP:-/dev/dma_heap/system-uncached} VKR_TRACE=${X400_VKR_TRACE:-} ANDROID_EMU_VK_LOADER_PATH=/system/lib64/libvulkan.so VIRGL_LOG_LEVEL=info \
+    "$STAGE/x400/x400vt" --venus --no-fork --multi-clients --socket-path="$R/tmp/.virgl_test" > "$D/logs/venus.log" 2>&1 &
 say "Venus server $!"
 sleep 1
 

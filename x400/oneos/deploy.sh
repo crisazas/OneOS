@@ -47,7 +47,16 @@ adb_ push "$ROOT/x400/oneos/guest_prepare.sh" "$ROOT/x400/oneos/guest_start.sh" 
 adb_ push "$ROOT/out/display/x400-display.dex" "$ROOT/out/display/libx400display.so" "$ROOT/x400/display/display.sh" \
          "$ROOT/x400/display/bin/capture" "$ROOT/x400/display/bin/inputd" "$ROOT/x400/phone/session-inner.sh" \
          "$ROOT/x400/phone/cpu-sample.sh" "$INC/" >/dev/null
-adb_ push "$ROOT/out/venus-build/virgl_test_server" "$INC/x400vt" >/dev/null
+# the server with VCMD_RESOURCE_IMPORT_FD (x400/venus/vtest-import.patch) when it was built, else the plain one
+VT=$ROOT/out/venus-build-import/virgl_test_server; [ -f "$VT" ] || VT=$ROOT/out/venus-build/virgl_test_server
+# X400_VT=<path> uses another server binary (for instance the one built with the VKR_TRACE prints)
+[ -n "${X400_VT:-}" ] && VT=$X400_VT
+adb_ push "$VT" "$INC/x400vt" >/dev/null
+# the guest's libvulkan_virtio with the dma-buf import (x400/venus/guest-mesa/build.sh), if built
+if [ -f "$ROOT/out/mesa-guest/libvulkan_virtio.so" ]; then
+    adb_ push "$ROOT/out/mesa-guest/libvulkan_virtio.so" "$INC/libvulkan_virtio.so" >/dev/null
+    su_ "mkdir -p $STAGE/x400 && cp -f $INC/libvulkan_virtio.so $STAGE/x400/libvulkan_virtio.so && chmod 644 $STAGE/x400/libvulkan_virtio.so && chcon u:object_r:apex_data_file:s0 $STAGE/x400/libvulkan_virtio.so"
+fi
 su_ "cp -f $INC/guest_prepare.sh $INC/guest_start.sh $STAGE/ && chmod 755 $STAGE/guest_prepare.sh $STAGE/guest_start.sh && \
      mkdir -p $STAGE/x400 && cd $INC && cp -f x400-display.dex libx400display.so display.sh capture inputd session-inner.sh cpu-sample.sh x400vt $STAGE/x400/ && \
      chmod 755 $STAGE/x400/* && chown -R 0:0 $STAGE/x400 $STAGE/guest_prepare.sh $STAGE/guest_start.sh && rm -rf $INC"
