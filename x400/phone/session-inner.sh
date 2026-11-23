@@ -51,8 +51,12 @@ wireplumber > /tmp/wp.log 2>&1 &
 sleep 2
 # With Zink, KWin runs under gdb in batch mode: if it dies, the backtrace ends /tmp/kwin.log (guest_start.sh copies it out).
 KWIN=kwin_wayland
+# Zink 25.0.7 leaks one dma-buf fd per barrier on a client's buffer (the kernel has no DMA_BUF_IOCTL_EXPORT_SYNC_FILE): this shim closes it (x400/venus/zink-syncfd-leak.c)
+SHIM=/tmp/mesa25/x400layer/libx400_syncfd.so; [ -f $SHIM ] && [ -z "$X400_NOSHIM" ] || SHIM=
 if [ "$GPU_USED" = zink ] && command -v gdb >/dev/null; then
-  KWIN="gdb -q -batch -ex 'handle SIGPIPE SIGUSR1 SIGUSR2 SIG34 SIG35 nostop noprint' -ex run -ex 'info registers pc' -ex 'thread apply all bt 25' --args kwin_wayland"
+  KWIN="gdb -q -batch -ex 'handle SIGPIPE SIGUSR1 SIGUSR2 SIG34 SIG35 nostop noprint' ${SHIM:+-ex 'set environment LD_PRELOAD $SHIM'} -ex run -ex 'info registers pc' -ex 'thread apply all bt 25' --args kwin_wayland"
+elif [ "$GPU_USED" = zink ] && [ -n "$SHIM" ]; then
+  KWIN="env LD_PRELOAD=$SHIM kwin_wayland"
 fi
 export QT_LOGGING_RULES="kwin_screencast.debug=true;kwin_core.debug=true;kwin_scene_opengl.debug=true;kwin_wayland_backend.debug=true" PIPEWIRE_DEBUG=${PWDBG:-2}
 eval $KWIN --virtual --no-lockscreen --width 2112 --height 1320 --socket wayland-x400 > /tmp/kwin.log 2>&1 &
