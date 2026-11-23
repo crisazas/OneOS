@@ -38,7 +38,7 @@ Three ways to reach a device: (1) the kernel already exposes it in the Linux way
 Not tested by a person: rotating the tablet by hand, a finger or the real S Pen in portrait, the on-screen keyboard, pairing and A2DP, the portal's camera dialog, both cameras at once.
 
 ## How the groups are wired (G0)
-- `x400/<group>/stage/` is pushed by `x400/oneos/deploy.sh` to `/data/local/tmp/oneos/x400/groups/<group>/`; `guest_start.sh` binds it in the guest at `/tmp/x400/<group>` and runs `stage/host.sh` on the Android side.
+- `x400/<group>/stage/` is pushed by `x400/oneos/deploy.sh` to `/data/local/tmp/oneos/x400/groups/<group>/` (the scripts are in git; the compiled binaries are not: run `x400/<group>/build.sh` before deploying, see README "Build"); `guest_start.sh` binds it in the guest at `/tmp/x400/<group>` and runs `stage/host.sh` on the Android side.
 - `x400/phone/session-inner.sh` runs each `stage/guest.sh` (audio and camera after PipeWire; sensors and radio before plasmashell, because Plasma's applets look for the buses when they load; input after inputd).
 - `guest_start.sh` stops the radio and camera groups when the way back starts (`oneos_rec_stop`), before the guest is killed: otherwise Bluetooth stays held by a dead relay in One UI.
 - `x400/rootfs-extras.sh` installs every `x400/*/PACKAGES` (minus `x400/NOT-IN-IMAGE`) and the groups' `image-conf` into the image; start a session with `ONEOS_GUEST_AUDIO=0 ONEOS_RETURN_MODE=inplace sh oneos_switch.sh`.

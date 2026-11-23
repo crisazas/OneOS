@@ -16,6 +16,7 @@ The desktop is drawn by the tablet's GPU, not by llvmpipe. Measured on the table
 - **Frame rate:** the frames that reach the layer went from ~7 fps (shared memory, `capture` copying into a file) to ~41 fps at 60 Hz and ~51 fps at 90 Hz with one `es2gears` on Zink.
   With `wl-client` (`x400/test/wl-client.c`, draws almost nothing, so it measures the chain and not a client), `capture` restarted at each mode, mean of 3 runs, frames shown by the helper:
   **63 fps at 90 Hz and 81 at 120 Hz** (80.6-81.1 across the runs); without `vtest-sync-pool.patch` it was 53 and 67. **90 fps is not reached.**
+  Later, with the hardware groups running and a rebuilt `capture` (one run at 120 Hz, not 3): 88 fps shown; the gain over the 81 is not isolated.
 - **What limits it (measured):** KWin's main thread. `simpleperf` on it (120 Hz, before the pool): ~60 % of a core busy, kernel 28 %, Zink 19 %, KWin's own code 17 %, Venus 6 %;
   `ScreenCastStream::record` is ~30 % and the scene paint ~47 % of its CPU. Each `vkGetFenceFdKHR`/`vkGetSemaphoreFdKHR` did a `VCMD_SYNC_CREATE` round trip to `x400vt` (~330/s) and the main thread waited on the socket ~200 ms
   per second. `x400/venus/guest-mesa/vtest-sync-pool.patch` removes it (the fd is an `eventfd` that is already signaled; nothing waited on that sync): `SYNC_CREATE` and `SYNC_UNREF` went to 0/s and the wait to ~1 ms/s.
@@ -53,6 +54,9 @@ without it), `x400/venus/zink-syncfd-leak.c` (an `LD_PRELOAD` shim: Zink 25.0.7 
   `$WS client-header $P/$x.xml $x-client-protocol.h; $WS private-code $P/$x.xml $x-protocol.c`; then
   `aarch64-linux-gnu-gcc -O2 -Wall --sysroot=$R -I. -Ix400/display -I$R/usr/include -I$R/usr/include/aarch64-linux-gnu -I$R/usr/include/pipewire-0.3 -I$R/usr/include/spa-0.2 x400/display/capture.c zkde-screencast-unstable-v1-protocol.c -o capture -L$R/usr/lib/aarch64-linux-gnu -Wl,-rpath-link,$R/usr/lib/aarch64-linux-gnu -Wl,--unresolved-symbols=ignore-in-shared-libs -lpipewire-0.3 -lwayland-client`
   (`inputd`: the same with `inputd.c fake-input-protocol.c` and `-lwayland-client -lm`). The results go in `x400/display/bin/`, which `x400/oneos/deploy.sh` pushes.
+  **Compiled binaries are not in git** (`.gitignore`: `x400/display/bin/`, `out/`, each group's binaries in `stage/`): `deploy.sh` pushes whatever is on the PC's disk, so build first (`capture` and `inputd` with the commands above, `x400/display/build.sh` for the helper, `x400/<group>/build.sh` for each group)
+  and again after changing a `.c`. A stale `capture` is not caught: on 2026-11-23 one built before the rotation commit (`8b2196d`) was deployed, `capture` died at start (`no PipeWire node from KWin`) and the helper got no frames;
+  rebuilt, it connected (`strings x400/display/bin/capture | grep "output transform"` tells the two apart).
 - `x400/venus/build.sh` -> `out/venus-build/virgl_test_server` (`x400/venus/prepare-virgl.sh` makes `out/virgl` from a checkout of Droid-VM's virglrenderer at `7e17c8e` plus `x400/venus/vkr-dma-heap.patch` and
   `x400/venus/vtest-x400.patch`, both ours).
 - `x400/display/build.sh` -> `out/display/{x400-display.dex,libx400display.so}`.
