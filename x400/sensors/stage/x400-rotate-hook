@@ -1,0 +1,12 @@
+#!/bin/sh
+# Called by x400-sensord --hook after every orientation change.
+# args: <orientation> <kscreen rotation> <inputd --rot> <logical width> <logical height>
+# It only records the state; the display helper and inputd (owned by G0) read /tmp/x400-orientation.env.
+cat > /tmp/x400-orientation.env.$$ <<EOT
+X400_ORIENT=$1
+X400_KSCREEN_ROT=$2
+X400_TOUCH_ROT=$3
+X400_LOGICAL_W=$4
+X400_LOGICAL_H=$5
+EOT
+mv /tmp/x400-orientation.env.$$ /tmp/x400-orientation.env
