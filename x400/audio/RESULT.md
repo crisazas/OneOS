@@ -285,3 +285,39 @@ the list (not played with).
 `guest_audio.flag` deleted (as in phase 2); `audioserver` running; the accelerometer `enable` back at `0`; debugfs
 unmounted; the live PipeWire/WirePlumber (16707/16957) never touched; test PipeWire, WirePlumber, bridge and `audiod`
 processes stopped and their files in the guest's /tmp removed.
+
+## Phase 4 (IV-sense confirmation): NOT DONE, the tablet rebooted and root is gone
+
+Stopped by the rule in CTX.md ("a reboot loses root: say so in RESULT and stop"). Nothing of the final round was measured.
+
+What happened: the first IV-sense attempt, with the tone at 10 % through `audioserver`, ran `x400-snd cap` on
+`pcmC0D16c` (rc=124, no data, the HAL owns the PCMs) and `pcmC0D21c` (`prepare: Invalid argument`).
+The second attempt (tone 10 %, then `x400-snd cap 0 118 ...`, the SPKAMP reference PCM that `audioserver`'s HAL keeps
+open) lost adb in the middle of the command. When adb came back (after `adb kill-server`):
+`/proc/uptime` = 43 s, `su: inaccessible or not found` (uid 2000 shell), `kwin_wayland` not running, One UI's
+`zygote`/`zygote_next` running, `init.svc.audioserver=running` (init's own). So: **reboot, root (DFroot) lost, the
+Linux session is gone.** I do not know the cause. It coincides with opening a capture PCM that the audio HAL had
+open while a stream played; I cannot rule that out as the trigger, and G5's camera work was running on the same device,
+so I cannot say it was mine either. Do not repeat `cap` on `pcmC0D118c`/`D16c` while a stream plays until the cause is known.
+
+State now (read as shell, no root): `guest_audio.flag` absent, `audioserver` running (init's), the amplifier controls are
+the boot defaults (volume 0, switch Disable: `aw_dev_*_volume` was never written by me in this round), the accelerometer
+untouched. Nothing of mine is running. `x400/audio/` is committed and clean; no code was changed in this round.
+
+### Plan for when root is back (not run)
+1. IV-sense: the HAL already opens `pcmC0D118c` (SPKAMP reference, `ABOX SPKAMP_A/B` -> WDMA9/WDMA4) and feeds the Awinic
+   algorithm with it, so a second reader may be refused or may disturb it. Safer than a second open: take the same signal
+   from the firmware log (`abox/runtime/log`, `awinic_get_big_data`, already read in phase 3: identical for 0 % and 15 %, but
+   always with `aw_dev_*_volume` = 0) and repeat it **with** `aw_dev_0_volume`/`aw_dev_1_volume` = 500 and the switches
+   Enable, before looking for a new capture path. If `max_excursion` then follows the tone amplitude, that is the physical proof.
+2. The HAL's own volume: `grep -n aw_dev /vendor/etc/mixer_paths.xml /vendor/etc/mixer_gains.xml` found only `aw_dev_N_prof`,
+   `aw_dev_N_switch`, `aw_dev_N_hmute`; **no** `aw_dev_N_volume` anywhere in the XML and `gain-media-speaker` is empty. So the
+   HAL does not set it in this configuration, and the value read during playback (0) is the one the HAL leaves.
+   Whether 0 means "no attenuation" (the Awinic convention: volume register = attenuation steps) or "mute" is the open question;
+   the owner's registers observation (reg 0x01 changes at volume 600) suggests the chip reacts to it, not that 0 is silent.
+3. Only after 1 and 2 show an effect, put `aw_dev_N_switch Enable` and `aw_dev_N_volume <value>` in `x400-audiod` (set when the
+   output stream opens, back to the default when it closes) and in `stage/host.sh`, then test through the bridge.
+   I did not write that code now: it would be untested and could change a speaker's gain with nobody to listen.
+
+### Verdict (unchanged): sound **not confirmed**.
+No measurement of this round exists; phase 3's verdict stands.
