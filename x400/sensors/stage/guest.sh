@@ -8,8 +8,8 @@ if ! [ -S /run/dbus/system_bus_socket ]; then
 fi
 export DBUS_SYSTEM_BUS_ADDRESS=unix:path=/run/dbus/system_bus_socket
 [ -x /usr/libexec/upowerd ] && /usr/libexec/upowerd > /tmp/upowerd.log 2>&1 &
-# --rotate stays off until the display helper and inputd follow a rotation (G6); X400_ROTATE=1 turns it on
-if [ "${X400_ROTATE:-0}" = 1 ]; then
+# --rotate: the display helper, capture and inputd follow KWin's output rotation (x400/display/ROTATION.md); X400_ROTATE=0 turns it off
+if [ "${X400_ROTATE:-1}" = 1 ]; then
   exec $G/x400-sensord --rotate --hook $G/x400-rotate-hook > /tmp/sensord.log 2>&1
 else
   exec $G/x400-sensord > /tmp/sensord.log 2>&1
