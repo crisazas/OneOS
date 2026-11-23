@@ -33,6 +33,8 @@ if [ "$1" != --scripts-only ]; then
     [ -f "$IMG" ] || { echo "missing $IMG (x400/build-rootfs-plasma.sh)" >&2; exit 1; }
     want=$(stat -c %s "$IMG")
     have=$(su_ "stat -c %s $STAGE/system.raw 2>/dev/null" | tr -d '\r')
+    # the size alone is not enough: a rebuilt image of the same size (rootfs-extras.sh keeps SIZE) is a different image
+    [ "$have" = "$want" ] && [ "$(su_ "cat $STAGE/rootfs.id 2>/dev/null" | tr -d '\r')" != "$(sha256sum "$IMG" | cut -d' ' -f1)" ] && have=changed
     if [ "$have" != "$want" ]; then
         adb_ push "$IMG" /data/local/tmp/x400-system.raw.tmp >/dev/null
         su_ "mv -f /data/local/tmp/x400-system.raw.tmp $STAGE/system.raw && chown 0:0 $STAGE/system.raw && chmod 644 $STAGE/system.raw"

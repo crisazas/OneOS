@@ -14,6 +14,8 @@ sudo cp /usr/bin/qemu-aarch64-static "$R/usr/bin/"; sudo cp /etc/resolv.conf "$R
 for m in proc sys dev; do mountpoint -q "$R/$m" || sudo mount --rbind /$m "$R/$m"; done
 # nothing may start a daemon inside the chroot while installing (it shares the host's /proc, /sys and network)
 printf '#!/bin/sh\nexit 101\n' | sudo tee "$R/usr/sbin/policy-rc.d" >/dev/null; sudo chmod 755 "$R/usr/sbin/policy-rc.d"
+# falkon's postinst still links into /usr/share/qt5 (a Qt5 leftover) and fails without it, which leaves the package unconfigured
+sudo mkdir -p "$R/usr/share/qt5"
 sudo chroot "$R" /usr/bin/env DEBIAN_FRONTEND=noninteractive sh -c "apt-get update -qq && apt-get install -y --no-install-recommends $PKGS && apt-get clean && rm -rf /var/lib/apt/lists/*"
 sudo rm -f "$R/usr/sbin/policy-rc.d"
 # config files the groups want inside the (read-only) image: x400/<group>/image-conf/<path under /etc/> and the keyboard's kwinrc
@@ -21,6 +23,8 @@ for d in x400/*/image-conf; do [ -d "$d" ] || continue
   sudo mkdir -p "$R/etc/wireplumber/wireplumber.conf.d"; sudo cp "$d"/*.conf "$R/etc/wireplumber/wireplumber.conf.d/"
 done
 [ -f x400/input/kwinrc-keyboard ] && { sudo mkdir -p "$R/etc/xdg"; grep -v '^#' x400/input/kwinrc-keyboard | sudo tee "$R/etc/xdg/kwinrc" >/dev/null; }
+# the apps that need their own environment: x400/apps/bin/<name> goes to /usr/local/bin, which comes before /usr/bin in PATH (their .desktop files call them by name)
+[ -d x400/apps/bin ] && { sudo mkdir -p "$R/usr/local/bin"; sudo install -m 755 x400/apps/bin/* "$R/usr/local/bin/"; }
 umnt
 sudo rm -f "$R/usr/bin/qemu-aarch64-static" "$R/etc/resolv.conf"
 echo "installed: $PKGS"

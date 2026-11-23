@@ -1,0 +1,39 @@
+# Everyday desktop apps (x400/rootfs-extras.sh installs them with the groups' packages). No LibreOffice, on purpose (size).
+# Browser: Ubuntu's firefox is a snap and there is no chromium for arm64, so falkon (QtWebEngine)
+falkon
+# Documents, images, archives
+okular
+gwenview
+kde-spectacle
+ark
+# Media
+vlc
+haruna
+elisa
+kamoso
+ffmpeg
+# Utilities
+kcalc
+kclock
+partitionmanager
+filelight
+ksystemlog
+plasma-systemmonitor
+# Discover needs PackageKit (its apt backend is in the same package) to install anything
+plasma-discover
+packagekit
+# Fonts
+fonts-noto
+fonts-noto-color-emoji
+# Settings (Bluetooth, themes, sound, screen lock...): the panel's launcher needs the application, the modules were already there
+systemsettings
+kinfocenter
+plasma-pa
+kde-config-screenlocker
+plasma-workspace-wallpapers
+kde-config-gtk-style
+breeze-gtk-theme
+plasma-disks
+# vlc is Qt5: its Wayland platform plugin, and PulseAudio's socket on top of PipeWire
+qtwayland5
+pipewire-pulse

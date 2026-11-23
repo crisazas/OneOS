@@ -65,6 +65,8 @@ if [ "$U" != root ]; then
 fi
 as_user pipewire > /tmp/pw.log 2>&1 &
 sleep 2
+# the PulseAudio socket for apps that only speak that (vlc): pipewire-pulse, when the image has it
+command -v pipewire-pulse > /dev/null && { as_user pipewire-pulse > /tmp/pw-pulse.log 2>&1 & }
 as_user wireplumber > /tmp/wp.log 2>&1 &
 sleep 2
 # Hardware groups (x400/HARDWARE.md): each ships /tmp/x400/<group>/guest.sh (bound by guest_start.sh); a failing one never stops the desktop.
@@ -85,7 +87,7 @@ export QT_LOGGING_RULES="kwin_screencast.debug=true;kwin_core.debug=true;kwin_sc
 # the file /tmp/x400-kwin-perf (put there by the stage, since the session starts with an empty environment) makes KWin write "kwin perf statistics <output>.csv" in /tmp:
 # per frame, the target and the real pageflip time and the render start and end
 [ -f /tmp/x400-kwin-perf ] && { export KWIN_LOG_PERFORMANCE_DATA=1; cd /tmp; }
-as_user sh -c "exec $KWIN --virtual --no-lockscreen --width 2112 --height 1320 --socket wayland-x400 > /tmp/kwin.log 2>&1" &
+as_user sh -c "exec $KWIN --virtual --width 2112 --height 1320 --socket wayland-x400 > /tmp/kwin.log 2>&1" &
 sleep 6
 export WAYLAND_DISPLAY=wayland-x400 QT_QPA_PLATFORM=wayland
 # KWin's virtual output has one mode, 60 Hz. Add a 120 Hz mode and make it the current one before Plasma and the capture start (X400_HZ=60 keeps 60).

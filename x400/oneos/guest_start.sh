@@ -43,6 +43,8 @@ $BB mount -t tmpfs -o mode=1777 tmpfs "$R/tmp"
 $BB mount -t tmpfs -o mode=755 tmpfs "$R/run"
 $BB mount --bind /dev "$R/dev"
 $BB mount -t devpts -o newinstance,ptmxmode=0666,mode=620 devpts "$R/dev/pts" 2>/dev/null || $BB mount --bind /dev/pts "$R/dev/pts"
+# Chromium (falkon) and anything using POSIX shared memory needs /dev/shm; /dev is Android's and has none
+mkdir -p "$R/dev/shm" && $BB mount -t tmpfs -o mode=1777,size=512m tmpfs "$R/dev/shm"
 $BB mount -t proc proc "$R/proc"
 $BB mount -t sysfs sysfs "$R/sys"
 # The frame file (11 MB rewritten per frame) lives in RAM: on f2fs every frame dirtied pages the kernel then wrote to flash.
