@@ -5,7 +5,7 @@ export XDG_DATA_DIRS=/usr/share XDG_CONFIG_DIRS=/etc/xdg KWIN_WAYLAND_NO_PERMISS
 # robustness2 nullDescriptor, which Samsung's Mali driver does not offer). A probe decides: if Zink does not come up the desktop runs
 # on llvmpipe as before, never without a picture. X400_GPU=sw forces llvmpipe, X400_GPU=zink forces Zink (no probe).
 M=/tmp/mesa25/usr/lib/aarch64-linux-gnu
-export VK_DRIVER_FILES=/usr/share/vulkan/icd.d/virtio_icd.json VN_DEBUG=vtest VN_PERF=no_fence_feedback
+export VK_DRIVER_FILES=/usr/share/vulkan/icd.d/virtio_icd.json VN_DEBUG=vtest VN_PERF=no_fence_feedback,no_semaphore_feedback,no_query_feedback
 zink_env() {
   printf '{"file_format_version":"1.0.0","ICD":{"library_path":"%s/libEGL_mesa.so.0"}}\n' "$M" > /tmp/50_mesa.json
   export LD_LIBRARY_PATH=$M LIBGL_DRIVERS_PATH=$M/dri __EGL_VENDOR_LIBRARY_FILENAMES=/tmp/50_mesa.json GBM_BACKENDS_PATH=$M/gbm
@@ -54,7 +54,7 @@ KWIN=kwin_wayland
 if [ "$GPU_USED" = zink ] && command -v gdb >/dev/null; then
   KWIN="gdb -q -batch -ex 'handle SIGPIPE SIGUSR1 SIGUSR2 SIG34 SIG35 nostop noprint' -ex run -ex 'info registers pc' -ex 'thread apply all bt 25' --args kwin_wayland"
 fi
-export QT_LOGGING_RULES="kwin_screencast.debug=true" PIPEWIRE_DEBUG=${PWDBG:-2}
+export QT_LOGGING_RULES="kwin_screencast.debug=true;kwin_core.debug=true;kwin_scene_opengl.debug=true;kwin_wayland_backend.debug=true" PIPEWIRE_DEBUG=${PWDBG:-2}
 eval $KWIN --virtual --no-lockscreen --width 2112 --height 1320 --socket wayland-x400 > /tmp/kwin.log 2>&1 &
 sleep 6
 export WAYLAND_DISPLAY=wayland-x400 QT_QPA_PLATFORM=wayland
