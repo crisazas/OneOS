@@ -48,6 +48,8 @@ $BB mount -t sysfs sysfs "$R/sys"
 # The frame file (11 MB rewritten per frame) lives in RAM: on f2fs every frame dirtied pages the kernel then wrote to flash.
 $BB mount -t tmpfs -o mode=1777,size=32m tmpfs "$D/fb" || say "tmpfs for the frame file failed: it stays on $D/fb (f2fs)"
 mkdir -p "$R/tmp/fb"; $BB mount --bind "$D/fb" "$R/tmp/fb"
+# $STAGE/x400/kwin-perf present: KWin logs its per-frame timing (session-inner.sh looks for /tmp/x400-kwin-perf)
+[ -e "$STAGE/x400/kwin-perf" ] && : > "$R/tmp/x400-kwin-perf"
 if [ -d "$STAGE/x400/mesa25" ]; then
     mkdir -p "$R/tmp/mesa25"; $BB mount --bind "$STAGE/x400/mesa25" "$R/tmp/mesa25" && say "Mesa 25.0.7 for Zink bound at /tmp/mesa25"
 fi
