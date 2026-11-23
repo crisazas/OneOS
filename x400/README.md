@@ -30,26 +30,25 @@ without it), `x400/venus/zink-syncfd-leak.c` (an `LD_PRELOAD` shim: Zink 25.0.7 
 
 ## Build (on the PC; needs sudo, qemu-user-static, gcc-aarch64-linux-gnu, libvulkan-dev, the Android NDK 28.2 and SDK build-tools)
 - `x400/build-rootfs-plasma.sh` -> `out/rootfs-plasma.ext4` (6 GB, Ubuntu 26.04.1 arm64 + Plasma + PipeWire + wireplumber).
-  `capture` and `inputd` are compiled inside that chroot (they need libpipewire and libwayland): see the commands in `PLAN-linux-x400.md`.
+  `capture` and `inputd` are built on the PC against that rootfs (`R=out/rootfs-plasma`; the PC has no `wayland-scanner`, so the rootfs's runs under qemu). Checked on 2026-11-23:
+  `WS="qemu-aarch64-static -L $R $R/usr/bin/wayland-scanner"; P=$R/usr/share/plasma-wayland-protocols`; for `x` in `zkde-screencast-unstable-v1` and `fake-input`:
+  `$WS client-header $P/$x.xml $x-client-protocol.h; $WS private-code $P/$x.xml $x-protocol.c`; then
+  `aarch64-linux-gnu-gcc -O2 -Wall --sysroot=$R -I. -Ix400/display -I$R/usr/include -I$R/usr/include/aarch64-linux-gnu -I$R/usr/include/pipewire-0.3 -I$R/usr/include/spa-0.2 x400/display/capture.c zkde-screencast-unstable-v1-protocol.c -o capture -L$R/usr/lib/aarch64-linux-gnu -Wl,-rpath-link,$R/usr/lib/aarch64-linux-gnu -Wl,--unresolved-symbols=ignore-in-shared-libs -lpipewire-0.3 -lwayland-client`
+  (`inputd`: the same with `inputd.c fake-input-protocol.c` and `-lwayland-client -lm`). The results go in `x400/display/bin/`, which `x400/oneos/deploy.sh` pushes.
 - `x400/venus/build.sh` -> `out/venus-build/virgl_test_server` (`x400/venus/prepare-virgl.sh` makes `out/virgl` from a checkout of Droid-VM's virglrenderer at `7e17c8e` plus `x400/venus/vkr-dma-heap.patch` and
   `x400/venus/vtest-x400.patch`, both ours).
 - `x400/display/build.sh` -> `out/display/{x400-display.dex,libx400display.so}`.
 
-## Run (OneOS's shape: preflight, session, way back)
-`x400/phone/deploy.sh` (PC, adb) stages everything in `/data/local/tmp/oneos-x400` (separate from OneOS's own `/data/local/tmp/oneos`;
-deleting it removes it all) and pins the files in `stage.sha256`; the session refuses to start if one changed. The image gets
-`chcon u:object_r:apex_data_file:s0` (the loop's kernel thread cannot read `shell_data_file`). `--no-image` re-stages only the scripts.
-
-On the tablet, as root:
-- `sh /data/local/tmp/oneos-x400/x400_switch.sh [--seconds N] [--cmd 'command inside the chroot']`: preflight first (root, busybox applets,
-  staged sums, no session already running, nothing of the stage mounted in init's namespace, MemAvailable >= 1500 MiB, `/dev/dma_heap/system`,
-  Samsung's `libvulkan.so`, a volume-key device); then the session in its own mount namespace, the display layer, and a watcher.
-  With `SHOT=/path.png` it also takes a `screencap` 12 s after the first frame. `--seconds 0` runs until the way back.
-- Way back: `sh /data/local/tmp/oneos-x400/x400_return.sh`, or hold **Volume Up + Volume Down for 3 s** (`x400_keywatch.sh` only reads the key
-  devices, never grabs them). The return removes the layer, kills every process whose root is the chroot (it shares Android's PID namespace;
-  `inputd` dying gives the touchscreen back), stops the Venus server, restores the stay-on setting, and checks and writes
-  `return.outcome`: no chroot process, no stage mount in init, no loop device, init's mount count as before. It is safe to run twice or with no session.
-- One UI keeps running the whole time; the side keys (event0..event4) are never opened for input.
+## Run (OneOS's flow: this branch only replaces the guest)
+OneOS's own scripts (`switcher/assets/`, `oneos_switch.sh`) do the preflight, stop One UI's framework, start the session and bring One UI back; `x400/oneos/` supplies the Linux guest.
+- `x400/oneos/deploy.sh [--scripts-only]` (PC, adb, root on the tablet): stages OneOS's scripts and `system.raw` (the rootfs image, checked by sha256) in `/data/local/tmp/oneos`,
+  replaces `guest_prepare.sh` and `guest_start.sh` with `x400/oneos/`'s, and puts the desktop's pieces (`capture`, `inputd`, `x400vt`, the display helper, `session-inner.sh`, Mesa 25.0.7) in `/data/local/tmp/oneos/x400`.
+  It refuses to run while a session is mounted.
+- Start, on the tablet as root: `cd /data/local/tmp/oneos && ONEOS_RETURN_MODE=inplace sh oneos_switch.sh`. The log is where you redirect it; the desktop's is `/data/local/tmp/oneos/data/takeover.log`.
+  `guest_prepare.sh` attaches `system.raw` read-only on a loop device and mounts it; `guest_start.sh` mounts a 32 MB tmpfs for `fb.bin`, starts `x400vt`, then `session-inner.sh` (KWin, Plasma), `capture` and the display helper.
+- Way back: hold **Volume Up + Volume Down for 3 s**, or `setprop oneos.guest.powerctl app:x400`. OneOS restores One UI in place and checks it (`auto_return.log`).
+  If the guest cannot be prepared, the switch returns to One UI by itself (it did once with `losetup` not finding `system.raw`; the same command worked a minute later).
+- A reboot loses root (DFroot) and the session; the stage under `/data/local/tmp/oneos` survives it.
 
 ## Facts that cost time
 - `VN_DEBUG=vtest` is mandatory (without it Mesa tries the real DRM node first and finds no GPU) and so is `VN_PERF=no_fence_feedback,no_semaphore_feedback,no_query_feedback` (with
@@ -60,7 +59,8 @@ On the tablet, as root:
 - The tablet's kernel (5.15) has no `DMA_BUF_IOCTL_{EXPORT,IMPORT}_SYNC_FILE`; there is no implicit dma-buf synchronization.
 - KWin 6.6.7 only allows screencast with OpenGL compositing, so QPainter is refused (llvmpipe is the fallback when Zink does not come up).
 - A swapchain on the layer needs `preTransform` IDENTITY (the surface reports ROTATE_90 as current), and a surface used with `ANativeWindow_lock` cannot get a Vulkan one afterwards.
-- With the Linux session up the USB connection to the PC dropped twice (once during a `simpleperf report` on the tablet); returning with Vol+ and Vol- brings it back. The cause is not known.
+- With the Linux session up the USB connection to the PC dropped three times; returning with Vol+ and Vol- brought it back twice. The third ended in a reboot: the kernel log shows `hard LOCKUP on cpu 1`
+  fifteen seconds after a `WARNING` in `rb_commit` under `__uprobe_trace_func` in `kwin_wayland`, i.e. tracefs uprobes set by us on KWin. Do not use uprobes on a live session. The causes of the first two (one during a `simpleperf report`) are not known.
 - Without systemd, Plasma's services are started by hand: `kglobalacceld`, `kded6`, `kactivitymanagerd`, `kbuildsycoca6`, then `plasmashell`.
 - The chroot shares the PID namespace with Android: `plasma.sh` kills only processes whose root is the chroot.
 - The screen must be awake (`svc power stayon true`) or `screencap` is black; the panel is landscape.
