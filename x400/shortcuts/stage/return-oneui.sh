@@ -8,4 +8,5 @@ if [ ! -d "$REQ" ]; then
   exit 1
 fi
 kdialog --title "Volver a One UI" --warningyesno "Se cerrará el escritorio Linux y volverá One UI (tarda unos 2 minutos, con la pantalla en negro).\n\nLo que tengas sin guardar se perderá. Los paquetes y ajustes ya guardados se conservan.\n\n¿Volver a One UI ahora?" || exit 0
-echo app > "$REQ/oneos_return"
+# the folder is the root's (700): the desktop user writes it through sudo
+if [ "$(id -u)" = 0 ]; then echo app > "$REQ/oneos_return"; else echo app | sudo -n tee "$REQ/oneos_return" > /dev/null; fi

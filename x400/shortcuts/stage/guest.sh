@@ -1,11 +1,12 @@
 #!/bin/sh
-# Runs in the guest as root (session-inner.sh, `grp shortcuts`). Puts three shortcuts where the user finds them, idempotently (the root is persistent,
+# Runs in the guest as root (session-inner.sh, `grp shortcuts`); X400_HOME is the desktop user's home (/root when the desktop runs as root). Puts three shortcuts where the user finds them, idempotently (the root is persistent,
 # so what is here from an earlier session stays and is replaced by the current text):
 #   Desktop/One UI           opens One UI's shared storage (/mnt/oneui, guest_start.sh) in Dolphin
 #   Desktop/Volver a One UI  asks for confirmation (return-oneui.sh) and brings One UI back
 #   a "One UI" entry in Dolphin's Places panel (~/.local/share/user-places.xbel)
 G=${X400_SHORTCUTS_G:-/tmp/x400/shortcuts}
-D=/root/Desktop
+H=${X400_HOME:-/root}
+D=$H/Desktop
 mkdir -p "$D"
 cat > "$D/oneui.desktop" <<EOT
 [Desktop Entry]
@@ -28,7 +29,7 @@ Terminal=false
 Categories=System;
 EOT
 chmod 755 "$D/oneui.desktop" "$D/volver-a-oneui.desktop"
-P=/root/.local/share/user-places.xbel
+P=$H/.local/share/user-places.xbel
 if [ -f "$P" ] && ! grep -q 'file:///mnt/oneui' "$P"; then
   python3 - "$P" <<'EOT'
 import sys
@@ -51,3 +52,5 @@ i = s.rindex('</xbel>')
 open(p, 'w').write(s[:i] + entry + s[i:])
 EOT
 fi
+[ "$H" != /root ] && chown "$(stat -c %u "$H"):$(stat -c %g "$H")" "$D" "$D/oneui.desktop" "$D/volver-a-oneui.desktop" "$P" 2>/dev/null
+exit 0
