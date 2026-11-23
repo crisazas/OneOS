@@ -1,5 +1,58 @@
 # G3 audio: result
 
+## FINAL STATE (read this first; the phases below are the history and some of their conclusions were later corrected)
+
+**The speaker works in the OneOS session. Confirmed by the owner's ear** ("suena bien"), with the framework stopped and `x400-pwbridge`
+-> `x400-audiod` -> AAudio. My own microphone measurements are partial evidence only (see "What my measurements do and do not show").
+
+### Why the speaker was silent in the session, and the fix
+With One UI's framework stopped there is no `system_server`/AudioService, and nobody gives `audio_policy` the volume range and index of the
+stream. Every curve then reports `APM_AudioPolicyManager: invalid volume index range in the curve N` (Min/Max -1), `checkAndSetVolume failed,
+requesting volume range init`, and the track gain is -inf: AAudio, AudioFlinger, the HAL and the amplifier all run, but nothing is audible.
+**Fix:** set it ourselves, `initStreamVolume(STREAM_MUSIC, 0, 15)` + `setStreamVolumeIndex(STREAM_MUSIC, 5, speaker)`. These are C++ symbols of
+`libaudiobase.so` (`android::AudioSystem::initStreamVolume`, `::setStreamVolumeIndex`, not in the NDK): `x400-setvol.c` resolves them with `dlsym`.
+With it, logcat shows `checkAndSetVolume: output 21, stream 3, index 5, devices 0x2, volume 0.022387, muted false` (before it: `-1 -1` and `failed`).
+Index 5 of 15 is moderate; `X400_STREAM_INDEX` changes it. The amplifier's own `aw_dev_*_volume` is an attenuation and must stay 0 (phase 5).
+It is applied (a) by `x400-audiod` when it starts and at every speaker open, and (b) by `stage/host.sh`, which watches `pidof audioserver` every
+2 s and re-applies, after `media.audio_policy` is registered, whenever the pid changes (a restart loses the setting).
+Tested: `kill -9` of audioserver (pid 18102 -> 6748), `host.sh` log `11:26:50 volume applied to audioserver 6748 (STREAM_MUSIC index 5/15)`, logcat
+`initStreamVolume() stream 3, min 0, max 15` about 2 s after the new pid. Then a `pw-cat` of a 12 s gated tone (2 tone blocks) through the bridge: `x400-audiod`
+logged the bytes (peak 0.0729: the 10 % file times PipeWire's sink volume 0.90, cubic, = 0.729) and logcat showed
+`checkAndSetVolume: output 21, stream 3, index 5, devices 0x2, volume 0.022387`. The owner then heard it.
+
+### RULE: never run `dumpsys media.audio_flinger` or `dumpsys audio` while audioserver is up
+Without `system_server` `AudioFlinger::dump -> dumpClients_ll -> mediautils::UidInfo::getCachedInfo` dereferences a null pointer: SIGSEGV
+(tombstone_22, 11:20:57, found by the owner). init relaunches audioserver and the volume range is lost (the policy goes back to `-1 -1`).
+I called `dumpsys media.audio_flinger` in my 11:1x diagnostic scripts (`dig.sh` got `DEAD_OBJECT` on its first call; `tl.sh` calls it too), so **those
+particular runs, and the policy "going back to -1 -1" I reported, were my own doing**. Nothing delivered calls it (`grep dumpsys` over the sources
+finds only the warning in `host.sh`). Use `logcat` only. (`dumpsys media.audio_policy` was used in phases 2-5 and did not crash; it is not needed.)
+
+### What my measurements do and do not show
+- Phases 2-5: the tablet's microphone heard the tone strongly in the first seconds of each recording, with negative controls (nothing played, other
+  frequency, stream volume 0). That stands.
+- The microphone reads near-silence after about 5-10 s of continuous tone (a 20 s tone: 4-5e-3 until second 5, then ~1e-5; in the gated test only the
+  first 3 s block is seen). This **is not explained by the `dumpsys` crash**: the runs at 11:09-11:13 (`cont.sh`, the `pw-cat` gated test through the
+  bridge) made no `dumpsys media.audio_flinger` call and decayed the same way, and the `selftest` runs at 11:27-11:28 (no dumpsys, volume applied,
+  audioserver pid stable) still show the first block only. `x400-audiod`'s log shows the bytes of all tone blocks reaching AAudio. My guess, a gain control
+  on the capture path reacting to a long single tone, is **not demonstrated**. The owner hears the speaker fine, so the speaker is not what decays.
+- `selftest` told you `TONE HEARD` earlier from a recording where only one of three tone blocks was present: the test accepted any bimodal
+  recording. Fixed: it now counts blocks (see below). With the fix, on this session it prints `INCONCLUSIVE (1 of 3 tone blocks seen by the
+  microphone)`, which is the honest reading of those recordings. The authoritative verdict for the speaker is the owner's ear.
+
+### Files (stage/) and what changed in this last round
+`x400-audiod` (starts with the volume applied), `x400-setvol` (new), `host.sh` (pid watcher, `x400-setvol`, dumpsys warning), `x400-aaudio`
+(selftest requires all three tone blocks: HEARD / INCONCLUSIVE / NOT HEARD, exit 0 / 3 / 1). Unchanged: `guest.sh`, `x400-pwbridge`, `x400-snd`,
+`x400-feed`. `build.sh` now builds everything (including `x400-setvol` through `build-android.sh`) and fills `stage/`.
+Do not use `x400-snd cap` on any PCM the HAL holds (phase 4).
+
+### What G0 must wire (unchanged except for the points above)
+1. `session-inner.sh`, after PipeWire and WirePlumber: `sh /tmp/x400/audio/guest.sh &`
+2. Start OneOS with `ONEOS_GUEST_AUDIO=0` if possible (`host.sh` also removes the flag).
+3. `deploy.sh` pushes `x400/audio/stage/`; `guest_start.sh` runs `host.sh`. Nothing else.
+4. Do not ship `pipewire.conf.d/50-x400-alsa.conf` (the guest must not open `hw:0,7`).
+
+---
+
 **Status: the software chain runs end to end (guest -> bridge -> Android -> amplifier); that the speaker emits sound is NOT confirmed (verdict in "Phase 3").** With Android's
 `audioserver` running, AAudio playback reaches the Awinic amplifiers (`start_pa: start success`), but
 the microphone never measured the tone. See "Phase 2" at the end. Phase 1 (below) was done with
@@ -171,7 +224,7 @@ small program using `pw-cat --playback/--record` on the socket, or a libpipewire
 "Microfono" nodes. Keep `pipewire.conf.d/50-x400-alsa.conf` out of it: with audioserver owning the PCMs the
 guest must not open `hw:0,7`.
 
-## Phase 3: independent proofs, verdict, bridge
+## Phase 3: independent proofs, verdict, bridge  [history: its 'not confirmed' was the missing volume range, see FINAL STATE]
 
 Owner away, nobody can listen. Output limit for this round: 15 % (all tests <= 15 %; the bridge test ran with
 `X400_MAXAMP=5`). Every stream is closed at the end; the amp's own `aw_dev_*_volume` was never touched (0).
@@ -294,7 +347,7 @@ The tablet rebooted at 06:22:59 while I opened `pcmC0D118c` for capture with a p
 `audioserver` (AAudio) and the mixer controls (`controlC0`) only. `x400-snd cap` stays in the tree only for idle PCMs.
 
 
-## Phase 5 (after the reboot, root back): the tone IS heard by the tablet's own microphone
+## Phase 5 (after the reboot, root back): the tone IS heard by the tablet's own microphone  [history: superseded by FINAL STATE for the OneOS session and for the long-tone behaviour]
 
 State when measured: uptime 25 min after the reboot, One UI's framework up (`system_server`, `zygote`, `surfaceflinger` running), `audioserver`
 is init's own, STREAM_MUSIC index 1 of 0..15, `guest_audio.flag` absent, amp `aw_dev_*_volume` 0, `aw_dev_*_switch` Disable (the HAL turns the

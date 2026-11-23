@@ -5,7 +5,8 @@
  *   x400-aaudio rec  <secs> <out.raw> [src]        record s16le 48000 mono/stereo, print RMS/peak per 0.25 s
  *   x400-aaudio both <hz> <secs> <amp%> <out.raw>  record while a tone plays (acoustic loop: speaker -> mic)
  *   x400-aaudio selftest [hz] [amp%]               18 s: 3 s tone / 3 s silence on the speaker while the microphone records;
- *                                                  prints the tone magnitude per second and "TONE HEARD" / "TONE NOT HEARD"
+ *                                                  prints the tone magnitude per second and "TONE HEARD" (all 3
+ *                                                  tone blocks seen) / "INCONCLUSIVE" (1-2) / "TONE NOT HEARD"
  *
  * Build: x400/audio/build-android.sh
  */
@@ -132,8 +133,13 @@ static double goertzel(const int16_t *s, long n, double hz)
 
 static int cmp_d(const void *a, const void *b) { double x = *(const double *)a, y = *(const double *)b; return (x > y) - (x < y); }
 
-/* Plays the gated tone and records at the same time, then decides from the recording alone: the magnitude at the tone
- * frequency, one value per second, must be bimodal (3 s high / 3 s low) with the top third >= 8x the bottom third. */
+/* Plays the gated tone (3 s on / 3 s off, three tone blocks in 18 s) and records at the same time. The decision uses the
+ * recording alone, and only counts a tone block as heard when it appears as its own run of loud seconds:
+ *   floor = lower quartile of the per-second magnitudes at the tone frequency; a second is "loud" if it is >= 10x the floor
+ *   (and above 5e-5); a run of consecutive loud seconds is one heard block.
+ * 3 runs: TONE HEARD. 1-2 runs: INCONCLUSIVE (the tone may have been heard and then lost by the microphone path, the
+ * capture AGC does this on long tones; or it never played). 0 runs: TONE NOT HEARD.
+ * Exit status: 0 heard, 1 not heard, 3 inconclusive. */
 static int selftest(double hz, double amp)
 {
 	const char *path = "/data/local/tmp/x400-selftest.raw";
@@ -156,16 +162,22 @@ static int selftest(double hz, double amp)
 	for (int i = 0; i < secs; i++) {
 		m[i] = goertzel(buf + (long)i * RATE, RATE, hz);
 		srt[i] = m[i];
-		printf("sec %2d tone magnitude %.7f\n", i, m[i]);
 	}
 	qsort(srt, secs, sizeof *srt, cmp_d);
-	int k = secs / 3;
-	double lo = 0, hi = 0;
-	for (int i = 0; i < k; i++) { lo += srt[i]; hi += srt[secs - 1 - i]; }
-	double ratio = hi / (lo + 1e-12);
-	printf("selftest: top third / bottom third = %.1f (>= 8 means heard; no-tone controls gave 1-3)\n", ratio);
-	printf("selftest: %s (%.0f Hz, %.0f %%)\n", ratio >= 8 ? "TONE HEARD" : "TONE NOT HEARD", hz, amp * 100);
-	return ratio >= 8 ? 0 : 1;
+	double floor_ = srt[secs / 4];
+	double thr = fmax(10 * floor_, 5e-5);
+	int runs = 0, in_run = 0;
+	for (int i = 0; i < secs; i++) {
+		int loud = m[i] >= thr;
+		printf("sec %2d tone magnitude %.7f%s\n", i, m[i], loud ? "  loud" : "");
+		if (loud && !in_run) runs++;
+		in_run = loud;
+	}
+	printf("selftest: floor %.2e, threshold %.2e, %d of 3 tone blocks heard\n", floor_, thr, runs);
+	if (runs >= 3) { printf("selftest: TONE HEARD (%.0f Hz, %.0f %%, all 3 tone blocks)\n", hz, amp * 100); return 0; }
+	if (runs > 0) { printf("selftest: INCONCLUSIVE (%d of 3 tone blocks seen by the microphone; %.0f Hz, %.0f %%)\n", runs, hz, amp * 100); return 3; }
+	printf("selftest: TONE NOT HEARD (%.0f Hz, %.0f %%)\n", hz, amp * 100);
+	return 1;
 }
 
 int main(int argc, char **argv)

@@ -9,9 +9,11 @@
  * One client per socket. The AAudio stream is opened when a client connects and closed when it goes away,
  * so the speaker amplifier / microphone are not kept powered while nobody uses them.
  * Every second per connection it logs bytes, frames and RMS/peak (the Android-side evidence).
+ * X400_STREAM_INDEX (0..15, default 5) is the Android music-stream volume it sets in audio_policy (see policy_volume()).
  * X400_MAXAMP (percent of full scale, default 100) is a hard ceiling: samples are clipped to it, never scaled.
  */
 #include <aaudio/AAudio.h>
+#include <dlfcn.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <math.h>
@@ -50,6 +52,31 @@ static void dlog(const char *fmt, ...)
 	fputc('\n', dlogf);
 	fflush(dlogf);
 	pthread_mutex_unlock(&log_mu);
+}
+
+/* With One UI's framework stopped nobody gives audio_policy the volume range and index (AudioService does), every curve is
+ * "invalid" and the track gain is -inf: silent speaker. Same calls as x400-setvol.c; idempotent, so it runs at start and on every
+ * speaker open. audioserver restarting (init relaunches it after a crash) loses them again: stage/host.sh watches its pid and
+ * re-applies through x400-setvol. */
+static int stream_index = 5;
+
+static void policy_volume(void)
+{
+	static void *h;
+	static int (*init)(int, int, int);
+	static int (*set)(int, int, int, unsigned);
+	if (!h) {
+		h = dlopen("libaudiobase.so", RTLD_NOW);
+		if (h) {
+			init = dlsym(h, "_ZN7android11AudioSystem16initStreamVolumeE19audio_stream_type_tii");
+			set = dlsym(h, "_ZN7android11AudioSystem20setStreamVolumeIndexE19audio_stream_type_tib15audio_devices_t");
+		}
+		if (!init || !set) dlog("policy volume: libaudiobase symbols not found");
+	}
+	if (init && set) {
+		int a = init(3, 0, 15), b = set(3, stream_index, 0, 0x2);
+		dlog("policy volume: STREAM_MUSIC 0..15 index %d on speaker (%d, %d)", stream_index, a, b);
+	}
 }
 
 static int listen_unix(const char *path)
@@ -125,6 +152,7 @@ static void meter_log(struct meter *m, int force)
 /* guest -> speaker */
 static void serve_out(int c)
 {
+	policy_volume();
 	AAudioStream *s = open_stream(AAUDIO_DIRECTION_OUTPUT, 2);
 	if (!s) return;
 	dlog("out: client connected, stream open (rate %d ch %d)", AAudioStream_getSampleRate(s), AAudioStream_getChannelCount(s));
@@ -195,6 +223,7 @@ int main(int argc, char **argv)
 	dlogf = log ? fopen(log, "a") : stderr;
 	if (!dlogf) dlogf = stderr;
 	if (getenv("X400_MAXAMP")) max_amp = atof(getenv("X400_MAXAMP")) / 100.0;
+	if (getenv("X400_STREAM_INDEX")) stream_index = atoi(getenv("X400_STREAM_INDEX"));
 	signal(SIGPIPE, SIG_IGN);
 	char po[256], pi[256];
 	snprintf(po, sizeof po, "%s/x400-audio-out.sock", dir);
@@ -203,6 +232,7 @@ int main(int argc, char **argv)
 	a_out[0] = listen_unix(po); a_out[1] = 1;
 	a_in[0] = listen_unix(pi); a_in[1] = 0;
 	dlog("x400-audiod up: %s, %s (output ceiling %.0f %%)", po, pi, max_amp * 100);
+	policy_volume();
 	pthread_t t;
 	pthread_create(&t, NULL, loop, a_in);
 	loop(a_out);
