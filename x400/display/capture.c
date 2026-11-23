@@ -46,6 +46,7 @@ static struct spa_source *lsrc, *csrc;
 static struct pw_buffer *inflight, *pending;
 static uint64_t sent_frames, copied_frames, raced, race_checked, replaced, arrived;
 static int negotiated_dmabuf, racecheck;
+static uint32_t out_transform;   // wl_output transform of KWin's output (0 normal, 1 = 90, 2 = 180, 3 = 270): sent with every frame, the helper turns the layer by it
 
 static void count_frame(void)
 {
@@ -98,7 +99,7 @@ static int send_frame(struct pw_buffer *b)
   struct fb_header *h = (struct fb_header *)map;
   struct fd_msg m = { .type = FDM_FRAME, .id = bi->id, .has_fd = !bi->sent, .width = vinfo.size.width, .height = vinfo.size.height,
                       .stride = sd->chunk->stride ? (uint32_t)sd->chunk->stride : vinfo.size.width * 4, .offset = sd->chunk->offset,
-                      .mapoffset = sd->mapoffset, .maxsize = sd->maxsize, .flags = sd->type == SPA_DATA_DmaBuf ? FDF_DMABUF : 0, .seq = h ? h->seq : 0 };
+                      .mapoffset = sd->mapoffset, .maxsize = sd->maxsize, .flags = (sd->type == SPA_DATA_DmaBuf ? FDF_DMABUF : 0) | (out_transform & FDF_ROT_MASK) << FDF_ROT_SHIFT, .seq = h ? h->seq : 0 };
   struct iovec iov = { &m, sizeof m };
   char cb[CMSG_SPACE(sizeof(int))] = {0};
   struct msghdr mh = { .msg_iov = &iov, .msg_iovlen = 1 };
@@ -159,10 +160,23 @@ static void on_remove_buffer(void *d, struct pw_buffer *b)
   free(bi); b->user_data = NULL;
 }
 
+static void o_geometry(void *d, struct wl_output *o, int32_t x, int32_t y, int32_t pw, int32_t ph, int32_t sub, const char *make, const char *model, int32_t tr)
+{ (void)d; (void)o; (void)x; (void)y; (void)pw; (void)ph; (void)sub; (void)make; (void)model; if ((uint32_t)tr != out_transform) fprintf(stderr, "capture: output transform %d\n", tr); out_transform = (uint32_t)tr & 7; }
+static void o_mode(void *d, struct wl_output *o, uint32_t f, int32_t w, int32_t h, int32_t r) { (void)d; (void)o; (void)f; (void)w; (void)h; (void)r; }
+static void o_done(void *d, struct wl_output *o) { (void)d; (void)o; }
+static void o_scale(void *d, struct wl_output *o, int32_t f) { (void)d; (void)o; (void)f; }
+static const struct wl_output_listener out_l = { o_geometry, o_mode, o_done, o_scale };
+
+static void on_wayland(void *d, int fd, uint32_t mask)
+{
+  (void)d; (void)fd;
+  if (mask & (SPA_IO_ERR | SPA_IO_HUP) || wl_display_dispatch(dpy) < 0) { fprintf(stderr, "capture: KWin went away\n"); pw_main_loop_quit(loop); }
+}
+
 static void reg_global(void *d, struct wl_registry *r, uint32_t id, const char *iface, uint32_t ver)
 {
   (void)d;
-  if (!strcmp(iface, "wl_output") && !output) output = wl_registry_bind(r, id, &wl_output_interface, 1);
+  if (!strcmp(iface, "wl_output") && !output) { output = wl_registry_bind(r, id, &wl_output_interface, 2); wl_output_add_listener(output, &out_l, NULL); }
   else if (!strcmp(iface, "zkde_screencast_unstable_v1")) cast = wl_registry_bind(r, id, &zkde_screencast_unstable_v1_interface, ver < 3 ? ver : 3);
 }
 static void reg_remove(void *d, struct wl_registry *r, uint32_t id) { (void)d; (void)r; (void)id; }
@@ -264,6 +278,7 @@ int main(int argc, char **argv)
   pw_init(&argc, &argv);
   loop = pw_main_loop_new(NULL);
   racecheck = getenv("X400_RACECHECK") != NULL;
+  pw_loop_add_io(pw_main_loop_get_loop(loop), wl_display_get_fd(dpy), SPA_IO_IN | SPA_IO_ERR | SPA_IO_HUP, false, on_wayland, NULL);
   if (!getenv("X400_NOFD")) {
     struct sockaddr_un sa = { .sun_family = AF_UNIX };
     if (snprintf(sa.sun_path, sizeof sa.sun_path, "%s.sock", path) < (int)sizeof sa.sun_path) {

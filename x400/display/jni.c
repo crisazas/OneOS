@@ -36,7 +36,8 @@ static struct fdbuf fdbufs[32];
 #define VKP_FRAMES 2
 static struct {
   int up, failed; VkInstance inst; VkPhysicalDevice pd; VkDevice dev; VkQueue q; VkSurfaceKHR surf; VkSwapchainKHR sc; VkCommandPool pool;
-  VkImage imgs[16]; uint32_t nimg; VkExtent2D ext; VkFormat fmt;
+  VkImage imgs[16]; uint32_t nimg; VkExtent2D ext; VkFormat fmt; VkColorSpaceKHR cs; VkPresentModeKHR mode; int portrait;
+  VkSurfaceTransformFlagBitsKHR pre_cur;
   struct { VkCommandBuffer cb; VkSemaphore acq, done; VkFence fence; } f[VKP_FRAMES]; uint32_t cur;
   PFN_vkGetMemoryFdPropertiesKHR getFdProps;
   uint64_t blits, acquire_max_us, acquire_sum_us, submit_sum_us;
@@ -70,6 +71,28 @@ static void fdbuf_clear(void) { for (int i = 0; i < 32; i++) if (fdbufs[i].base 
 static void vk_log(const char *what, VkResult r) { fprintf(stderr, "x400-display: vulkan: %s = %d\n", what, r); }
 #define VKC(x) do { VkResult r_ = (x); if (r_ != VK_SUCCESS) { vk_log(#x, r_); return -1; } } while (0)
 
+// (Re)creates the swapchain for a landscape (layer-sized, preTransform IDENTITY: SurfaceFlinger turns it with the display) or a portrait frame
+// (the panel's native 1320x2112, preTransform = the surface's current transform: the buffer is already in the panel's own orientation, nothing turns it).
+static int vk_swapchain(int width, int height, int portrait)
+{
+  VkSurfaceCapabilitiesKHR caps; VKC(vkGetPhysicalDeviceSurfaceCapabilitiesKHR(vk.pd, vk.surf, &caps));
+  VkSurfaceTransformFlagBitsKHR pre = VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR;
+  if (portrait) pre = caps.currentTransform;
+  else if (!(caps.supportedTransforms & VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR)) pre = caps.currentTransform;
+  vk.ext = portrait ? (VkExtent2D){ (uint32_t)(width < height ? width : height), (uint32_t)(width < height ? height : width) } : (VkExtent2D){ (uint32_t)(width < height ? height : width), (uint32_t)(width < height ? width : height) };
+  uint32_t minimg = 5; if (minimg < caps.minImageCount) minimg = caps.minImageCount; if (caps.maxImageCount && minimg > caps.maxImageCount) minimg = caps.maxImageCount;
+  VkSwapchainKHR old = vk.sc;
+  if (old) { vkDeviceWaitIdle(vk.dev); vkDestroySwapchainKHR(vk.dev, old, NULL); vk.sc = VK_NULL_HANDLE; }
+  VkSwapchainCreateInfoKHR sci = { VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR, .surface = vk.surf, .minImageCount = minimg, .imageFormat = vk.fmt, .imageColorSpace = vk.cs, .imageExtent = vk.ext,
+                                   .imageArrayLayers = 1, .imageUsage = VK_IMAGE_USAGE_TRANSFER_DST_BIT, .imageSharingMode = VK_SHARING_MODE_EXCLUSIVE, .preTransform = pre,
+                                   .compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR, .presentMode = vk.mode, .clipped = VK_TRUE };
+  VKC(vkCreateSwapchainKHR(vk.dev, &sci, NULL, &vk.sc));
+  vk.nimg = 0; vkGetSwapchainImagesKHR(vk.dev, vk.sc, &vk.nimg, NULL); if (vk.nimg > 16) vk.nimg = 16; vkGetSwapchainImagesKHR(vk.dev, vk.sc, &vk.nimg, vk.imgs);
+  vk.portrait = portrait; vk.pre_cur = caps.currentTransform;
+  if (old) fprintf(stderr, "x400-display: vulkan: swapchain %ux%u (%s, preTransform %d, surface current %d extent %ux%u)\n", vk.ext.width, vk.ext.height, portrait ? "portrait" : "landscape", (int)pre, (int)caps.currentTransform, caps.currentExtent.width, caps.currentExtent.height);
+  return 0;
+}
+
 // Brings up the instance, device and a swapchain on the layer's window. Returns 0, or -1 (then the CPU path is used and Vulkan is left alone).
 static int vk_init(ANativeWindow *win, int width, int height)
 {
@@ -98,29 +121,21 @@ static int vk_init(ANativeWindow *win, int width, int height)
   VkSurfaceCapabilitiesKHR caps; VKC(vkGetPhysicalDeviceSurfaceCapabilitiesKHR(vk.pd, vk.surf, &caps));
   if (!(caps.supportedUsageFlags & VK_IMAGE_USAGE_TRANSFER_DST_BIT)) { fprintf(stderr, "x400-display: vulkan: the surface cannot be a transfer destination\n"); return -1; }
   uint32_t nf = 0; vkGetPhysicalDeviceSurfaceFormatsKHR(vk.pd, vk.surf, &nf, NULL); VkSurfaceFormatKHR sf[32]; if (nf > 32) nf = 32; vkGetPhysicalDeviceSurfaceFormatsKHR(vk.pd, vk.surf, &nf, sf);
-  VkColorSpaceKHR cs = 0; vk.fmt = VK_FORMAT_UNDEFINED;
+  vk.cs = 0; vk.fmt = VK_FORMAT_UNDEFINED;
   // the swapchain of this driver is RGBA only; the frames are BGRA, so each one is blitted (a raw copy would swap red and blue)
-  for (uint32_t i = 0; i < nf; i++) if (sf[i].format == VK_FORMAT_B8G8R8A8_UNORM) { vk.fmt = sf[i].format; cs = sf[i].colorSpace; }
-  for (uint32_t i = 0; vk.fmt == VK_FORMAT_UNDEFINED && i < nf; i++) if (sf[i].format == VK_FORMAT_R8G8B8A8_UNORM) { vk.fmt = sf[i].format; cs = sf[i].colorSpace; }
+  for (uint32_t i = 0; i < nf; i++) if (sf[i].format == VK_FORMAT_B8G8R8A8_UNORM) { vk.fmt = sf[i].format; vk.cs = sf[i].colorSpace; }
+  for (uint32_t i = 0; vk.fmt == VK_FORMAT_UNDEFINED && i < nf; i++) if (sf[i].format == VK_FORMAT_R8G8B8A8_UNORM) { vk.fmt = sf[i].format; vk.cs = sf[i].colorSpace; }
   if (vk.fmt == VK_FORMAT_UNDEFINED) { fprintf(stderr, "x400-display: vulkan: no BGRA or RGBA swapchain format\n"); return -1; }
   uint32_t nm = 0; vkGetPhysicalDeviceSurfacePresentModesKHR(vk.pd, vk.surf, &nm, NULL); VkPresentModeKHR pm[16]; if (nm > 16) nm = 16; vkGetPhysicalDeviceSurfacePresentModesKHR(vk.pd, vk.surf, &nm, pm);
-  VkPresentModeKHR mode = VK_PRESENT_MODE_FIFO_KHR; int have_mailbox = 0;
+  vk.mode = VK_PRESENT_MODE_FIFO_KHR; int have_mailbox = 0;
   for (uint32_t i = 0; i < nm; i++) if (pm[i] == VK_PRESENT_MODE_MAILBOX_KHR) have_mailbox = 1;
-  if (have_mailbox && !getenv("X400_FIFO")) mode = VK_PRESENT_MODE_MAILBOX_KHR;
-  vk.ext = caps.currentExtent.width == 0xffffffffu ? (VkExtent2D){ (uint32_t)width, (uint32_t)height } : caps.currentExtent;
-  uint32_t minimg = 5; if (minimg < caps.minImageCount) minimg = caps.minImageCount; if (caps.maxImageCount && minimg > caps.maxImageCount) minimg = caps.maxImageCount;
-  // preTransform IDENTITY: the surface reports ROTATE_90 as current and the picture would come out sideways and cropped
-  VkSwapchainCreateInfoKHR sci = { VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR, .surface = vk.surf, .minImageCount = minimg, .imageFormat = vk.fmt, .imageColorSpace = cs, .imageExtent = vk.ext,
-                                   .imageArrayLayers = 1, .imageUsage = VK_IMAGE_USAGE_TRANSFER_DST_BIT, .imageSharingMode = VK_SHARING_MODE_EXCLUSIVE,
-                                   .preTransform = (caps.supportedTransforms & VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR) ? VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR : caps.currentTransform,
-                                   .compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR, .presentMode = mode, .clipped = VK_TRUE };
-  VKC(vkCreateSwapchainKHR(vk.dev, &sci, NULL, &vk.sc));
-  vk.nimg = 0; vkGetSwapchainImagesKHR(vk.dev, vk.sc, &vk.nimg, NULL); if (vk.nimg > 16) vk.nimg = 16; vkGetSwapchainImagesKHR(vk.dev, vk.sc, &vk.nimg, vk.imgs);
+  if (have_mailbox && !getenv("X400_FIFO")) vk.mode = VK_PRESENT_MODE_MAILBOX_KHR;
+  if (vk_swapchain(width, height, 0)) return -1;
   VkCommandBufferAllocateInfo cbi = { VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO, .commandPool = vk.pool, .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY, .commandBufferCount = 1 };
   VkSemaphoreCreateInfo sem = { VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO }; VkFenceCreateInfo fci = { VK_STRUCTURE_TYPE_FENCE_CREATE_INFO, .flags = VK_FENCE_CREATE_SIGNALED_BIT };
   for (int i = 0; i < VKP_FRAMES; i++) { VKC(vkAllocateCommandBuffers(vk.dev, &cbi, &vk.f[i].cb)); VKC(vkCreateSemaphore(vk.dev, &sem, NULL, &vk.f[i].acq));
                                          VKC(vkCreateSemaphore(vk.dev, &sem, NULL, &vk.f[i].done)); VKC(vkCreateFence(vk.dev, &fci, NULL, &vk.f[i].fence)); }
-  fprintf(stderr, "x400-display: vulkan up: swapchain %u images %ux%u format %d, present mode %s\n", vk.nimg, vk.ext.width, vk.ext.height, vk.fmt, mode == VK_PRESENT_MODE_MAILBOX_KHR ? "mailbox" : "fifo");
+  fprintf(stderr, "x400-display: vulkan up: swapchain %u images %ux%u format %d, present mode %s\n", vk.nimg, vk.ext.width, vk.ext.height, vk.fmt, vk.mode == VK_PRESENT_MODE_MAILBOX_KHR ? "mailbox" : "fifo");
   vk.up = 1;
   return 0;
 }
@@ -149,13 +164,14 @@ static int vk_import(struct fdbuf *fb, int fd, const struct fd_msg *m)
 // Blits one frame into the swapchain and presents it. The image is in PREINITIALIZED the first time and TRANSFER_SRC after: one barrier handles both with UNDEFINED
 // (the contents are written by KWin's GPU work, not by us, and a linear image keeps them through a layout change).
 // Returns 0 shown, -1 failed (the caller drops to the CPU path for good).
-static int vk_show(struct fdbuf *fb, const struct fd_msg *m)
+static int vk_show(struct fdbuf *fb, const struct fd_msg *m, int flip)
 {
   uint64_t t0 = now_us();
   uint32_t k = vk.cur; vk.cur = (vk.cur + 1) % VKP_FRAMES;
   vkWaitForFences(vk.dev, 1, &vk.f[k].fence, VK_TRUE, UINT64_MAX); vkResetFences(vk.dev, 1, &vk.f[k].fence);
   uint32_t idx; VkResult r = vkAcquireNextImageKHR(vk.dev, vk.sc, UINT64_MAX, vk.f[k].acq, VK_NULL_HANDLE, &idx);
   uint64_t t1 = now_us();
+  if (r == VK_ERROR_OUT_OF_DATE_KHR) { VkSubmitInfo e = { VK_STRUCTURE_TYPE_SUBMIT_INFO }; vkQueueSubmit(vk.q, 1, &e, vk.f[k].fence); return 1; }
   if (r != VK_SUCCESS && r != VK_SUBOPTIMAL_KHR) { vk_log("vkAcquireNextImageKHR", r); return -1; }
   vkResetCommandBuffer(vk.f[k].cb, 0);
   VkCommandBufferBeginInfo bi = { VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO, .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT };
@@ -168,7 +184,9 @@ static int vk_show(struct fdbuf *fb, const struct fd_msg *m)
   VkImageMemoryBarrier bb[2] = { bs, bd };
   vkCmdPipelineBarrier(vk.f[k].cb, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, NULL, 0, NULL, 2, bb);
   int32_t w = (int32_t)(vk.ext.width < m->width ? vk.ext.width : m->width), h = (int32_t)(vk.ext.height < m->height ? vk.ext.height : m->height);
-  VkImageBlit bl = { .srcSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 }, .srcOffsets = { { 0, 0, 0 }, { w, h, 1 } }, .dstSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 }, .dstOffsets = { { 0, 0, 0 }, { w, h, 1 } } };
+  // a turn by 180 degrees is a blit with the destination corners swapped: no shader needed
+  VkImageBlit bl = { .srcSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 }, .srcOffsets = { { 0, 0, 0 }, { w, h, 1 } }, .dstSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 },
+                     .dstOffsets = { { flip ? w : 0, flip ? h : 0, 0 }, { flip ? 0 : w, flip ? 0 : h, 1 } } };
   vkCmdBlitImage(vk.f[k].cb, fb->img, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, vk.imgs[idx], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &bl, VK_FILTER_NEAREST);
   VkImageMemoryBarrier bp = bd; bp.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT; bp.dstAccessMask = 0; bp.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL; bp.newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
   vkCmdPipelineBarrier(vk.f[k].cb, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, 0, 0, NULL, 0, NULL, 1, &bp);
@@ -188,6 +206,7 @@ static int vk_show(struct fdbuf *fb, const struct fd_msg *m)
 
 // 1: a frame was shown (or skipped), 0: nothing yet, -1: the socket is gone.
 static int path_chosen, geometry_set;
+static unsigned flip_mask = 0x6;   // bit n: the frames of the output transform n are blitted turned by 180 degrees; X400_FLIP overrides (a test knob)
 static void cpu_geometry(ANativeWindow *win, int width, int height)
 {
   if (geometry_set) return;
@@ -225,9 +244,17 @@ static int sock_frame(int s, ANativeWindow *win, int width, int height, uint64_t
   if (fd >= 0) close(fd);
   struct fd_reply r = { FDM_DONE, m.id };
   if (fb && fb->img && vk.up) {
-    if (m.width == (uint32_t)width && m.height == (uint32_t)height) {
-      if (vk_show(fb, &m)) { vk.up = 0; vk.failed = 1; fprintf(stderr, "x400-display: vulkan failed: this surface cannot be drawn with the CPU any more; the layer will be recreated at the next session\n"); }
-      else (*frames)++;
+    // The frame is the upright desktop. Landscape frames fill the layer (SurfaceFlinger turns them with the display); a portrait frame is the panel's native
+    // orientation and needs a swapchain of its own. Measured with screencap (ROTATION.md): the frames of transform 1 (left) and 2 (inverted) come out
+    // 180 degrees off in the layer, so they are blitted with the destination corners swapped; those of 0 and 3 (right) are not.
+    int portrait = m.height > m.width, rot = (int)((m.flags >> FDF_ROT_SHIFT) & FDF_ROT_MASK);
+    int flip = (flip_mask >> rot) & 1;
+    if (portrait != vk.portrait) { if (vk_swapchain(width, height, portrait)) { vk.up = 0; vk.failed = 1; } }
+    if (!vk.up) { fprintf(stderr, "x400-display: vulkan failed while resizing\n"); }
+    else if (m.width == vk.ext.width && m.height == vk.ext.height) {
+      int rc = vk_show(fb, &m, flip);
+      if (rc < 0) { vk.up = 0; vk.failed = 1; fprintf(stderr, "x400-display: vulkan failed: this surface cannot be drawn with the CPU any more; the layer will be recreated at the next session\n"); }
+      else if (rc == 0) (*frames)++;
     }
   } else if (fb && fb->base && m.width == (uint32_t)width && m.height == (uint32_t)height && !vk.up) {
     cpu_geometry(win, width, height);
@@ -250,6 +277,7 @@ JNIEXPORT jint JNICALL Java_X400Display_nRun(JNIEnv *env, jclass type, jobject s
   struct sigaction sa = { .sa_handler = on_signal };
   sigemptyset(&sa.sa_mask);
   sigaction(SIGTERM, &sa, NULL); sigaction(SIGINT, &sa, NULL); sigaction(SIGHUP, &sa, NULL);
+  if (getenv("X400_FLIP")) flip_mask = (unsigned)strtoul(getenv("X400_FLIP"), NULL, 0);
   const char *path = (*env)->GetStringUTFChars(env, file, NULL);
   char path_copy[256]; snprintf(path_copy, sizeof path_copy, "%s", path);
   // The guest creates the file when its capture starts, which can be after the layer is up: wait for it (up to 5 minutes).
