@@ -54,7 +54,9 @@ static int phase_cpu(ANativeWindow *win, double secs)
   ANativeWindow_setBuffersGeometry(win, W, H, 5 /* BGRA_8888 */);
   uint8_t *frame = malloc((size_t)W * H * 4); for (size_t i = 0; i < (size_t)W * H * 4; i++) frame[i] = (uint8_t)i;
   unsigned long n = 0, fail = 0; double t0 = now(), c0 = cpu_now(), lock = 0, copy = 0, post = 0;
+  double period = env_int("X400_VKP_FPS", 0) > 0 ? 1.0 / env_int("X400_VKP_FPS", 0) : 0, next = t0;
   while (now() - t0 < secs) {
+    if (period > 0) { double w = next - now(); if (w > 0) { struct timespec ts_ = { 0, (long)(w * 1e9) }; nanosleep(&ts_, NULL); } next += period; if (now() > next + 4 * period) next = now(); }
     ANativeWindow_Buffer b; double a = now();
     if (ANativeWindow_lock(win, &b, NULL) < 0) { fail++; usleep(2000); continue; }
     double b1 = now();
@@ -118,7 +120,12 @@ static int import_source(void)
   return 0;
 }
 
-static const char *mode_name(VkPresentModeKHR m) { return m == VK_PRESENT_MODE_IMMEDIATE_KHR ? "immediate" : m == VK_PRESENT_MODE_MAILBOX_KHR ? "mailbox" : m == VK_PRESENT_MODE_FIFO_KHR ? "fifo" : m == VK_PRESENT_MODE_FIFO_RELAXED_KHR ? "fifo-relaxed" : "other"; }
+static const char *mode_name(VkPresentModeKHR m)
+{
+  static char o[4][24]; static int k;
+  switch (m) { case VK_PRESENT_MODE_IMMEDIATE_KHR: return "immediate"; case VK_PRESENT_MODE_MAILBOX_KHR: return "mailbox"; case VK_PRESENT_MODE_FIFO_KHR: return "fifo"; case VK_PRESENT_MODE_FIFO_RELAXED_KHR: return "fifo-relaxed"; default: break; }
+  k = (k + 1) & 3; snprintf(o[k], sizeof o[k], "mode-%d", (int)m); return o[k];
+}
 
 static int phase_vk(VkPresentModeKHR mode, double secs, VkSurfaceCapabilitiesKHR caps, VkFormat fmt, VkColorSpaceKHR cs, int cpuwrite)
 {
@@ -135,15 +142,18 @@ static int phase_vk(VkPresentModeKHR mode, double secs, VkSurfaceCapabilitiesKHR
   VkSemaphoreCreateInfo sem = { VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO }; VkFenceCreateInfo fci = { VK_STRUCTURE_TYPE_FENCE_CREATE_INFO, .flags = VK_FENCE_CREATE_SIGNALED_BIT };
   for (int i = 0; i < 2; i++) { CK(vkAllocateCommandBuffers(dev, &cbi, &f[i].cb)); CK(vkCreateSemaphore(dev, &sem, NULL, &f[i].acq)); CK(vkCreateSemaphore(dev, &sem, NULL, &f[i].done)); CK(vkCreateFence(dev, &fci, NULL, &f[i].fence)); }
   VkExtent3D ce = { ext.width < W ? ext.width : W, ext.height < H ? ext.height : H, 1 };
-  unsigned long n = 0, bad = 0; double t0 = now(), c0 = cpu_now(), tw = 0, ta = 0, ts = 0, tp = 0, tc = 0, worst = 0, last = t0; uint32_t cur = 0;
+  unsigned long n = 0, bad = 0; double t0 = now(), c0 = cpu_now(), tw = 0, ta = 0, ts = 0, tp = 0, tc = 0, worst = 0, last = t0, slept = 0, acq_max = 0, pres_max = 0; uint32_t cur = 0;
+  double period = env_int("X400_VKP_FPS", 0) > 0 ? 1.0 / env_int("X400_VKP_FPS", 0) : 0, next = t0;
+  double lat_sum = 0, lat_max = 0; unsigned long lat_n = 0;
   while (now() - t0 < secs) {
+    if (period > 0) { double w = next - now(); if (w > 0) { struct timespec ts_ = { 0, (long)(w * 1e9) }; nanosleep(&ts_, NULL); slept += w; } next += period; if (now() > next + 4 * period) next = now(); }
     double s0 = now();
     vkWaitForFences(dev, 1, &f[cur].fence, VK_TRUE, UINT64_MAX); vkResetFences(dev, 1, &f[cur].fence);
     double s1 = now(); tw += s1 - s0;
     if (cpuwrite) write_bar(n);
     double s2 = now(); tc += s2 - s1;
     uint32_t idx; r = vkAcquireNextImageKHR(dev, sc, UINT64_MAX, f[cur].acq, VK_NULL_HANDLE, &idx);
-    double s3 = now(); ta += s3 - s2;
+    double s3 = now(); ta += s3 - s2; if (s3 - s2 > acq_max) acq_max = s3 - s2;
     if (r != VK_SUCCESS && r != VK_SUBOPTIMAL_KHR) { bad++; if (bad > 3) { LOG("vk-%s: acquire = %d", mode_name(mode), r); break; } continue; }
     vkResetCommandBuffer(f[cur].cb, 0);
     VkCommandBufferBeginInfo bi = { VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO, .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT };
@@ -170,12 +180,14 @@ static int phase_vk(VkPresentModeKHR mode, double secs, VkSurfaceCapabilitiesKHR
     if (r) { LOG("vk-%s: submit = %d", mode_name(mode), r); break; }
     VkPresentInfoKHR pi = { VK_STRUCTURE_TYPE_PRESENT_INFO_KHR, .waitSemaphoreCount = 1, .pWaitSemaphores = &f[cur].done, .swapchainCount = 1, .pSwapchains = &sc, .pImageIndices = &idx };
     r = vkQueuePresentKHR(q, &pi);
-    double s5 = now(); tp += s5 - s4;
+    double s5 = now(); tp += s5 - s4; if (s5 - s4 > pres_max) pres_max = s5 - s4;
     if (r != VK_SUCCESS && r != VK_SUBOPTIMAL_KHR) { LOG("vk-%s: present = %d", mode_name(mode), r); break; }
     if (s5 - last > worst) worst = s5 - last; last = s5;
+    { double lat = s5 - s1; lat_sum += lat; if (lat > lat_max) lat_max = lat; lat_n++; }
     cur ^= 1; n++;
   }
   double dt = now() - t0, cpu = cpu_now() - c0;
+  if (period > 0) LOG("pace: producer at %d fps, slept %.2f s of %.1f; from 'frame ready' to 'present returned': mean %.2f ms, max %.2f ms; worst acquire %.2f ms, worst present %.2f ms", env_int("X400_VKP_FPS", 0), slept, dt, lat_n ? lat_sum * 1000 / lat_n : 0, lat_max * 1000, acq_max * 1000, pres_max * 1000);
   LOG("RESULT vk-%s: %lu frames in %.1f s = %.1f fps; process CPU %.1f ms/frame (%.0f%% of a core); per frame: wait-fence %.2f ms, cpu-write %.2f ms, acquire %.2f ms, record+submit %.2f ms, present %.2f ms; worst frame %.0f ms; swapchain %u images %ux%u",
       mode_name(mode), n, dt, n / dt, n ? cpu * 1000 / n : 0, cpu / dt * 100, n ? tw * 1000 / n : 0, n ? tc * 1000 / n : 0, n ? ta * 1000 / n : 0, n ? ts * 1000 / n : 0, n ? tp * 1000 / n : 0, worst * 1000, nimg, ext.width, ext.height);
   vkDeviceWaitIdle(dev);
@@ -227,11 +239,12 @@ static int run(ANativeWindow *win, double secs, double hold)
     LOG("no B8G8R8A8_UNORM swapchain format: using %d, so the frame is blitted (a raw copy would swap red and blue)", fmt);
   }
   uint32_t nm = 0; vkGetPhysicalDeviceSurfacePresentModesKHR(pd, surf, &nm, NULL); VkPresentModeKHR pm[8]; if (nm > 8) nm = 8; vkGetPhysicalDeviceSurfacePresentModesKHR(pd, surf, &nm, pm);
-  fprintf(stderr, "vkp: present modes:"); for (uint32_t i = 0; i < nm; i++) fprintf(stderr, " %s", mode_name(pm[i])); fputc('\n', stderr);
+  fprintf(stderr, "vkp: present modes:"); for (uint32_t i = 0; i < nm; i++) fprintf(stderr, " %s(%d)", mode_name(pm[i]), (int)pm[i]); fputc('\n', stderr);
 
   int cpuwrite = env_int("X400_VKP_CPUWRITE", 1);
   VkPresentModeKHR order[3] = { VK_PRESENT_MODE_IMMEDIATE_KHR, VK_PRESENT_MODE_MAILBOX_KHR, VK_PRESENT_MODE_FIFO_KHR };
-  for (int k = 0; k < 3; k++) for (uint32_t i = 0; i < nm; i++) if (pm[i] == order[k]) { if (phase_vk(order[k], secs, caps, fmt, cs, cpuwrite)) return -1; }
+  const char *want = getenv("X400_VKP_MODE"); if (want && !*want) want = NULL;
+  for (int k = 0; k < 3; k++) for (uint32_t i = 0; i < nm; i++) if (pm[i] == order[k] && (!want || !strcmp(want, mode_name(order[k])))) { if (phase_vk(order[k], secs, caps, fmt, cs, cpuwrite)) return -1; }
   if (hold > 0) { LOG("holding fifo for %.0f s (screenshot now)", hold); phase_vk(VK_PRESENT_MODE_FIFO_KHR, hold, caps, fmt, cs, cpuwrite); }
   return 0;
 }
