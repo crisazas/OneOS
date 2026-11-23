@@ -127,6 +127,16 @@ cp "$R/tmp/gpu-choice.txt" "$D/logs/gpu-choice.txt" 2>/dev/null
 say "$(head -n 1 "$D/logs/gpu-choice.txt" 2>/dev/null || echo 'desktop GPU: not reported')"
 echo "[UI Activator] Home activated! (linux-x400 desktop)" >> /data/local/tmp/ui_activator.log
 
+# The way back starts by creating oneos_rec_stop (return_to_oneui.sh, [1/4]) and then kills everything of the guest with SIGKILL. The radio group's
+# processes must close /dev/scsc_h4_0 and give Wi-Fi back first, or One UI finds Bluetooth held by a dead relay: stop them on that signal.
+rm -f "$STAGE/data/oneos_rec_stop" 2>/dev/null
+( n=0; while [ ! -e "$STAGE/data/oneos_rec_stop" ] && kill -0 $DESK 2>/dev/null; do sleep 0.5; done
+  if [ -e "$STAGE/data/oneos_rec_stop" ]; then
+      say "the way back has started: stopping the radio group"
+      $BB chroot "$R" /usr/bin/env PATH=/usr/bin:/usr/sbin:/bin:/sbin sh /tmp/x400/radio/guest.sh stop > "$D/logs/group-radio-stop.log" 2>&1
+      [ -f "$STAGE/x400/groups/camera/stop.sh" ] && sh "$STAGE/x400/groups/camera/stop.sh" >> "$D/logs/group-radio-stop.log" 2>&1
+      say "radio group stopped"
+  fi ) &
 # Stay in the foreground for the session's watcher; the way back ends this namespace.
 while kill -0 $DESK 2>/dev/null; do sleep 5; done
 for f in kwin.log; do cp "$R/tmp/$f" "$D/logs/$f" 2>/dev/null; done
