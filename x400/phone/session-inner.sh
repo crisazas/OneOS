@@ -11,6 +11,8 @@ fi
 [ "$U" != root ] && chmod 666 /tmp/.virgl_test* 2>/dev/null
 as_user() { if [ "$U" = root ]; then "$@"; else setpriv --reuid=$U --regid=$U --init-groups "$@"; fi; }
 export HOME=$UH USER=$U LOGNAME=$U XDG_RUNTIME_DIR=/run/user/$UIDN LANG=C.UTF-8 XDG_SESSION_TYPE=wayland XDG_CURRENT_DESKTOP=KDE KDE_FULL_SESSION=true
+# the keyboard cover's layout (KWin falls back to the environment when kxkbrc names none); X400_KBD_LAYOUT=us for an English one
+export XKB_DEFAULT_LAYOUT=${X400_KBD_LAYOUT:-es}
 export XDG_DATA_DIRS=/usr/share XDG_CONFIG_DIRS=/etc/xdg KWIN_WAYLAND_NO_PERMISSION_CHECKS=1
 # GPU for the desktop's OpenGL: Zink (OpenGL over Vulkan) on Venus, from the Mesa 25.0.7 bound at /tmp/mesa25 (Zink from Mesa 25.2 demands
 # robustness2 nullDescriptor, which Samsung's Mali driver does not offer). A probe decides: if Zink does not come up the desktop runs
