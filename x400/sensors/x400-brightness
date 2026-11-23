@@ -1,0 +1,27 @@
+#!/bin/sh
+# x400-brightness: panel backlight of the SM-X400 (Samsung panel_drv, standard backlight class, 0..max_brightness = 0..308).
+# usage: x400-brightness              print "<value> <max> <percent>"
+#        x400-brightness 40%          set by percent (1..100, never 0: 0 turns the panel black)
+#        x400-brightness 120          set the raw value (1..max)
+#        x400-brightness +10% | -10%  relative step
+#        x400-brightness off | on     bl_power (panel stays alive, backlight off) -- touch still wakes nothing, use with care
+BL=${X400_BACKLIGHT:-/sys/class/backlight/panel}
+[ -w "$BL/brightness" ] || { echo "x400-brightness: $BL/brightness not writable" >&2; exit 1; }
+max=$(cat "$BL/max_brightness"); cur=$(cat "$BL/brightness")
+case "$1" in
+  "") echo "$cur $max $((cur * 100 / max))"; exit 0 ;;
+  off) echo 4 > "$BL/bl_power"; exit $? ;;
+  on)  echo 0 > "$BL/bl_power"; exit $? ;;
+esac
+arg=$1
+case "$arg" in
+  [+-]*%) d=${arg%\%}; new=$((cur + d * max / 100)) ;;
+  [+-]*)  new=$((cur + arg)) ;;
+  *%)     new=$((${arg%\%} * max / 100)) ;;
+  *[!0-9]*) echo "x400-brightness: bad value '$arg'" >&2; exit 2 ;;
+  *)      new=$arg ;;
+esac
+[ "$new" -lt 1 ] && new=1
+[ "$new" -gt "$max" ] && new=$max
+echo "$new" > "$BL/brightness" || exit 1
+echo "$new $max $((new * 100 / max))"

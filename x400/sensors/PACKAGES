@@ -1,0 +1,7 @@
+# x400/sensors: packages the guest rootfs needs (G0 installs them; everything else is already in the rootfs)
+# battery in Plasma (tested: upowerd lists battery_battery with state, voltage, 100 %)
+upower
+# brightness slider / dim / screen-off policy (NOT tested: it is only a candidate, see RESULT.md)
+powerdevil
+# build time on the PC only, for x400-sensord (libdbus-1-3 is already in the rootfs)
+libdbus-1-dev
