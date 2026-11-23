@@ -1,0 +1,63 @@
+--- a/vtest/vtest_renderer.c
++++ b/vtest/vtest_renderer.c
+@@ -33,6 +33,7 @@
+ #include <unistd.h>
+ #include <fcntl.h>
+ #include <limits.h>
++#include <pthread.h>
+ 
+ #include "virgl_hw.h"
+ #include "virglrenderer.h"
+@@ -241,13 +242,20 @@
+    list_add(&res->head, &renderer.free_resources);
+ }
+ 
++/* linux-x400: with --venus the server's queue threads call vtest_write_context_fence -> vtest_signal_timeline -> vtest_unref_sync while the
++ * main thread creates and refs syncs. free_syncs and the refcounts had no lock: two clients on Zink corrupted the list (both threads wrote
++ * to address 0, tombstone of 2026-11-22) and killed the server. One mutex covers the free list, next_sync_id and the refcounts. */
++static pthread_mutex_t sync_lock = PTHREAD_MUTEX_INITIALIZER;
++
+ static struct vtest_sync *vtest_new_sync(uint64_t value)
+ {
+    struct vtest_sync *sync;
+ 
++   pthread_mutex_lock(&sync_lock);
+    if (LIST_IS_EMPTY(&renderer.free_syncs)) {
+       sync = malloc(sizeof(*sync));
+       if (!sync) {
++         pthread_mutex_unlock(&sync_lock);
+          return NULL;
+       }
+ 
+@@ -259,24 +267,27 @@
+ 
+    sync->refcount = 1;
+    sync->value = value;
++   pthread_mutex_unlock(&sync_lock);
+ 
+    return sync;
+ }
+ 
+ static struct vtest_sync *vtest_ref_sync(struct vtest_sync *sync)
+ {
++   pthread_mutex_lock(&sync_lock);
+    sync->refcount++;
++   pthread_mutex_unlock(&sync_lock);
+    return sync;
+ }
+ 
+ static void vtest_unref_sync(struct vtest_sync *sync)
+ {
++   pthread_mutex_lock(&sync_lock);
+    assert(sync->refcount);
+    sync->refcount--;
+-   if (sync->refcount)
+-      return;
+-
+-   list_add(&sync->head, &renderer.free_syncs);
++   if (!sync->refcount)
++      list_add(&sync->head, &renderer.free_syncs);
++   pthread_mutex_unlock(&sync_lock);
+ }
+ 
+ static void vtest_free_timeline_submit(struct vtest_timeline_submit *submit)

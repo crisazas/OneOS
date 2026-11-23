@@ -1,0 +1,45 @@
+--- a/vtest/vtest_server.c
++++ b/vtest/vtest_server.c
+@@ -28,6 +28,8 @@
+ 
+ #include <stdio.h>
+ #include <signal.h>
++#include <ucontext.h>
++#include <unistd.h>
+ #include <stdbool.h>
+ #include <unistd.h>
+ #include <stdlib.h>
+@@ -285,12 +287,19 @@
+    server.render_device = getenv("VTEST_RENDERNODE");
+ }
+ 
+-static void handler(int sig, siginfo_t *si, void *unused)
+-{
+-   (void)sig; (void)si, (void)unused;
++static struct sigaction segv_previous;
+ 
+-   printf("SIGSEGV!\n");
+-   exit(EXIT_FAILURE);
++/* linux-x400: say where it faulted, then give the signal back to the handler Android installed, so debuggerd writes a tombstone
++ * with the backtrace of every thread (exit() here left nothing to look at). Returning re-executes the faulting instruction. */
++static void handler(int sig, siginfo_t *si, void *ctx)
++{
++   (void)sig;
++   ucontext_t *uc = ctx;
++   fprintf(stderr, "SIGSEGV! tid %d addr %p code %d pc 0x%llx lr 0x%llx sp 0x%llx\n", (int)gettid(), si->si_addr, si->si_code,
++           (unsigned long long)uc->uc_mcontext.pc, (unsigned long long)uc->uc_mcontext.regs[30],
++           (unsigned long long)uc->uc_mcontext.sp);
++   fflush(stderr);
++   sigaction(SIGSEGV, &segv_previous, NULL);
+ }
+ 
+ static void vtest_server_set_signal_child(void)
+@@ -320,7 +329,7 @@
+    sa.sa_flags = SA_SIGINFO;
+    sa.sa_sigaction = handler;
+ 
+-   ret = sigaction(SIGSEGV, &sa, NULL);
++   ret = sigaction(SIGSEGV, &sa, &segv_previous);
+    if (ret == -1) {
+       perror("Failed to set SIGSEGV");
+       exit(1);

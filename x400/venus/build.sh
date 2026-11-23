@@ -7,7 +7,7 @@
 # x400/venus/vtest-x400.patch (both ours, MIT); out/venus-src = the stub/ headers (see x400/CREDITS.md).
 set -eu
 X=$(cd "$(dirname "$0")" && pwd)
-V=$X/../../out/virgl; S=$X/../../out/venus-src; OUT=${1:-$X/../../out/venus-build}
+V=${VIRGL_TREE:-$X/../../out/virgl}; S=$X/../../out/venus-src; OUT=${1:-$X/../../out/venus-build}
 NDKROOT=${NDK:-$HOME/Android/Sdk/ndk/28.2.13676358}
 CC=$NDKROOT/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android30-clang
 mkdir -p "$OUT"
