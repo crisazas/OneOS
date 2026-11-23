@@ -1,11 +1,21 @@
-# Packages for the camera path, checked with apt-cache / apt-get -s in out/rootfs-plasma (resolute, arm64).
-# Already in the image: pipewire, wireplumber (v4l2 monitor scripts), libpipewire-0.3-dev, libspa-0.2-modules (spa/v4l2, videoconvert).
-# Direct 'apt-get -s install' of this list adds 32 packages (31 without gstreamer1.0-tools).
-xdg-desktop-portal
-xdg-desktop-portal-kde
-gstreamer1.0-pipewire
-gstreamer1.0-plugins-good
-gstreamer1.0-tools
-pipewire-v4l2
-v4l-utils
-# Optional: kamoso (KDE camera app; pulls gstreamer1.0-plugins-bad, gstreamer1.0-qt6, qml6-module-org-kde-purpose...) to see the camera as a user would.
+# G5 cameras: packages for the guest image (Ubuntu 26.04 resolute arm64), checked with `apt-get -s install` in out/rootfs-plasma (2026-11-23).
+# Already in the image, nothing to add: pipewire, wireplumber (its access-portal.lua gives the portal's clients camera access), libpipewire-0.3-0t64, libspa-0.2-modules.
+# x400-camsrc and x400-camtest need only libpipewire, which is there: they ran in the live guest without any package added.
+#
+# Needed so that applications can use the cameras:
+xdg-desktop-portal        # org.freedesktop.portal.Camera (IsCameraPresent, AccessCamera, OpenPipeWireRemote): Firefox, Chromium, Zoom, Kamoso, Snap...
+xdg-desktop-portal-kde    # the KDE backend (permission dialog); a portal without a backend still answers Camera, but KDE apps expect this one
+# Needed for applications that do not use PipeWire/the portal, only /dev/video*:
+pipewire-v4l2             # `pw-v4l2 <app>` (LD_PRELOAD shim) shows PipeWire Video/Source nodes as /dev/video* to V4L2-only programs; no kernel module
+# Needed for GStreamer-based applications (Kamoso, Cheese-like, gst-launch):
+gstreamer1.0-pipewire     # pipewiresrc / pipewiredevicemonitor (also lists the cameras as devices)
+gstreamer1.0-plugins-good # already a hard Depends of xdg-desktop-portal (it renders the portal's camera preview); listed for clarity
+# Diagnostics, optional:
+gstreamer1.0-tools        # gst-launch-1.0 pipewiresrc target-object=x400-camera-front ! videoconvert ! autovideosink
+v4l-utils                 # v4l2-ctl (with pw-v4l2: `pw-v4l2 v4l2-ctl --list-devices`)
+# Optional application to see it as a user would (pulls gstreamer1.0-plugins-bad, gstreamer1.0-qt6, qml6-module-org-kde-purpose...):
+# kamoso
+#
+# Sizes (apt-get -s on out/rootfs-plasma): portal + portal-kde = 27 new packages (includes plugins-base/-good, kio-fuse, fuse3, librsvg2-common); + pipewire-v4l2 + gstreamer1.0-pipewire = 29; + gstreamer1.0-tools + v4l-utils = 32.
+# The portal packages were NOT installed in the live guest, so the Camera portal itself is untested (see RESULT.md).
+# NOT needed: v4l2loopback-dkms/-utils (the kernel is not ours to rebuild: MODULE_SIG=y), libcamera*, pipewire-libcamera (no libcamera pipeline for the Exynos IS).

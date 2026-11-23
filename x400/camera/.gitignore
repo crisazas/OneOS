@@ -1,2 +1,7 @@
 probe/camprobe
 probe/fakesvc
+stage/fakesvc
+stage/sensormgr
+stage/x400-camd
+stage/x400-camsrc
+stage/x400-camtest
