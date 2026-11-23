@@ -82,6 +82,9 @@ if [ "$HZ" != 60 ] && command -v kscreen-doctor >/dev/null; then
   done
   echo "x400: output mode $(kscreen-doctor -o 2>/dev/null | grep -a Modes | grep -a -o '[0-9x]*@[0-9.]*[^ ]*[*]' | head -1) after $n retries" >> /tmp/gpu-choice.txt
 fi
+# sensors first: it owns the guest's system bus; radio (NetworkManager, BlueZ) waits for it, and both must be on the bus before plasmashell loads its applets
+grp sensors
+grp radio
 $L/kglobalacceld > /tmp/kga.log 2>&1 &
 kded6 > /tmp/kded.log 2>&1 &
 sleep 3
@@ -92,8 +95,6 @@ plasmashell > /tmp/plasma.log 2>&1 &
 sleep 4
 /tmp/inputd --touch /dev/input/event8 --pen /dev/input/event10 --grab > /tmp/inputd.log 2>&1 &
 grp input
-grp sensors
-grp radio
 sleep 8
 PIPEWIRE_DEBUG=${PWDBG:-2} /tmp/capture /tmp/fb/fb.bin > /tmp/capture.log 2>&1 &
 # RUNSECS=0 (OneOS session): stay until the way back ends this mount namespace; the desktop's processes are watched, and
