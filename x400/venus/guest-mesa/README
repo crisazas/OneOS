@@ -2,3 +2,5 @@ linux-x400: patch for Mesa 26.0.8's src/virtio/vulkan/vn_renderer_vtest.c (the V
 Adds create_from_dma_buf over the vtest command VCMD_RESOURCE_IMPORT_FD = 64 (Mesa 26 uses 25..38 itself; server side: x400/venus/vtest-import.patch) and
 sets has_dma_buf_import. The patch also needs VCMD_RESOURCE_IMPORT_FD* from vtest_protocol.h (same patch, vtest side) in Mesa's
 src/virtio/vtest/vtest_protocol.h.
+vtest-sync-pool.patch (vn_device.[ch], vn_queue.c): vn_create_sync_file shares one sync per device instead of creating and destroying one per
+call, which cost a VCMD_SYNC_CREATE round trip each (~330/s). Applied after the first one, only when build.sh unpacks the source.
