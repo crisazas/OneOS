@@ -24,3 +24,9 @@ Three ways to reach a device: (1) the kernel already exposes it in the Linux way
 - Do not restart the session, `x400vt`, KWin or the display helper; G0 does. Do not touch the files of another group.
 - Everything a group adds is a script or a source under its own directory plus one line in the list of packages it needs (`x400/<group>/PACKAGES`).
 - Each group ends with `x400/<group>/RESULT.md`: what works (with the command and its output), what does not, and why.
+
+## Known crash (2026-11-23, kernel oops 06:22:59)
+Opening an ABOX capture PCM that Android's audio HAL already holds (`pcmC0D118c`, the amplifier reference/IV-sense) while a playback stream runs panics the kernel:
+`Oops: Fatal exception`, `pc: abox_wdma_mute_stream+0x38` from `snd_soc_dai_digital_mute` (`snd_soc_samsung_abox`). The reboot loses root and the session.
+Never open `/dev/snd/pcmC0D118c`, `pcmC0D16c` or `pcmC0D21c` from outside audioserver. Get root back: open DFRoot, tap LAUNCH ROOT once if it is enabled; if a
+reboot left KernelSU without the shell grant, KernelSU manager -> Superuser -> show system apps -> `com.android.shell` -> switch Superuser on (then `adb shell su -c id`).
