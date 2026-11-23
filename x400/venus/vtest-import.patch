@@ -1,6 +1,6 @@
 diff -ruN a/vtest/vtest.h b/vtest/vtest.h
---- a/vtest/vtest.h	2026-11-22 16:18:59.376148629 -0600
-+++ b/vtest/vtest.h	2026-11-22 16:18:59.377376499 -0600
+--- a/vtest/vtest.h	2026-11-22 16:28:04.371352120 -0600
++++ b/vtest/vtest.h	2026-11-22 16:28:04.372356406 -0600
 @@ -96,6 +96,7 @@
  int vtest_sync_wait(uint32_t length_dw);
  
@@ -10,16 +10,16 @@ diff -ruN a/vtest/vtest.h b/vtest/vtest.h
  void vtest_set_max_length(uint32_t length);
  
 diff -ruN a/vtest/vtest_protocol.h b/vtest/vtest_protocol.h
---- a/vtest/vtest_protocol.h	2026-11-22 16:18:59.376176643 -0600
-+++ b/vtest/vtest_protocol.h	2026-11-22 16:18:59.377403429 -0600
+--- a/vtest/vtest_protocol.h	2026-11-22 16:28:04.371379329 -0600
++++ b/vtest/vtest_protocol.h	2026-11-22 16:28:04.372393013 -0600
 @@ -82,6 +82,14 @@
  #define VCMD_SYNC_WRITE 22
  #define VCMD_SYNC_WAIT 23
  #define VCMD_SUBMIT_CMD2 24
 +
-+/* linux-x400: import a dma-buf the guest owns (it came from outside, e.g. a GBM buffer) as a resource Venus can use.
++/* linux-x400 (id 64: Mesa 26 uses 25..38 for its own DRM sync and export commands): import a dma-buf the guest owns (it came from outside, e.g. a GBM buffer) as a resource Venus can use.
 + * The request carries the dma-buf fd as SCM_RIGHTS on its last byte; resp: res_id */
-+#define VCMD_RESOURCE_IMPORT_FD 25
++#define VCMD_RESOURCE_IMPORT_FD 64
 +#define VCMD_RES_IMPORT_FD_SIZE 3
 +#define VCMD_RES_IMPORT_FD_TYPE 0 /* VCMD_BLOB_FD_DMABUF */
 +#define VCMD_RES_IMPORT_FD_SIZE_LO 1
@@ -28,8 +28,8 @@ diff -ruN a/vtest/vtest_protocol.h b/vtest/vtest_protocol.h
  
  #define VCMD_RES_CREATE_SIZE 10
 diff -ruN a/vtest/vtest_renderer.c b/vtest/vtest_renderer.c
---- a/vtest/vtest_renderer.c	2026-11-22 16:18:59.376198980 -0600
-+++ b/vtest/vtest_renderer.c	2026-11-22 16:18:59.377426484 -0600
+--- a/vtest/vtest_renderer.c	2026-11-22 16:28:04.371394085 -0600
++++ b/vtest/vtest_renderer.c	2026-11-22 16:28:04.372407999 -0600
 @@ -417,6 +417,28 @@
      return 0;
  }
@@ -127,8 +127,8 @@ diff -ruN a/vtest/vtest_renderer.c b/vtest/vtest_renderer.c
  {
     struct vtest_context *ctx = vtest_get_current_context();
 diff -ruN a/vtest/vtest_server.c b/vtest/vtest_server.c
---- a/vtest/vtest_server.c	2026-11-22 16:18:59.376074271 -0600
-+++ b/vtest/vtest_server.c	2026-11-22 16:18:59.377298914 -0600
+--- a/vtest/vtest_server.c	2026-11-22 16:28:04.371280749 -0600
++++ b/vtest/vtest_server.c	2026-11-22 16:28:04.372278060 -0600
 @@ -680,6 +680,7 @@
     [VCMD_SYNC_WRITE]            = { vtest_sync_write,            true },
     [VCMD_SYNC_WAIT]             = { vtest_sync_wait,             true },

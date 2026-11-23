@@ -204,3 +204,40 @@ Limpieza: el chroot comparte el espacio de PIDs con Android; `plasma.sh` mata so
 - Escritorio quieto: 4,6 fps de captura en 50 s (solo el arranque). Con un `konsole` desplazando texto: 5,8 fps, `kwin_wayland` 31 % de un núcleo (8 núcleos), `konsole` 3,9 %, `capture` 0,5 %.
   La CPU total está casi libre, así que el límite no es la CPU global: pendiente mirar `Cpus_allowed`/cpuset, el gobernador, los hilos de KWin y `/dev/pts` en el chroot (medición en curso).
 - Zink no arranca: el Vulkan de Samsung no ofrece `VK_EXT_robustness2` (102 extensiones) y Zink exige `nullDescriptor` (`zink_screen.c:3458`).
+
+---
+## GPU: lo medido sobre Zink + Venus, y lo que hacen otros proyectos (2026-11-22)
+### Medido en la tablet (cadena de fallos, cada uno con su causa leída en el código o en un backtrace)
+1. Zink de Mesa 26 exige `nullDescriptor` → **Mesa 25.0.7 de Debian** (`x400/build-mesa25.sh`) no lo exige y llega a OpenGL core 3.1 sobre Venus.
+2. `failed to choose pdev`: Zink 25.0 elige el dispositivo Vulkan por `VkPhysicalDeviceDrmPropertiesEXT.renderMajor/Minor`; Venus anuncia 1/1 → capa Vulkan
+   propia (`x400/venus/layer`) que anuncia 226:128 (`renderD128`). Resuelto.
+3. KWin cae en `dri2_from_dma_bufs` (puntero nulo en `libvulkan_virtio`): **vtest no tiene import de dma-buf** (`create_from_dma_buf = NULL`).
+   → comando nuevo `VCMD_RESOURCE_IMPORT_FD` = 64 (el 25..38 los usa ya Mesa 26 para syncs DRM y `RESOURCE_EXPORT_FD`), servidor `x400/venus/vtest-import.patch`
+   y cliente `x400/venus/guest-mesa/` (Mesa 26.0.8 recompilada, `build.sh`). Superado: KWin pasa de ahí.
+4. Siguiente caída: `zink_screen_import_dmabuf_semaphore` llama a `vkGetSemaphoreFdKHR`, nulo porque Venus solo anuncia `VK_KHR_external_semaphore_fd` con
+   `has_external_sync` y vtest lo deja a `false`. Zink 25.0.7 no comprueba que exista. Al anunciarlo, aparece el cuelgue siguiente (punto 6).
+5. **El kernel 5.15 de la tablet no tiene `DMA_BUF_IOCTL_{EXPORT,IMPORT}_SYNC_FILE`** (`ENOTTY`, medido con un programa en `/data/local/tmp/dmasync`). Ni un sync-file real
+   serviría para sincronizar un dma-buf; Zink lo ignora si falla. Sin sincronización implícita, la espera la tiene que hacer la CPU.
+6. Cuelgues de KWin (`vn_WaitSemaphores`, `poll()` sobre el fd de `export_syncobj`): resueltos sin tocar el servidor. `VN_PERF=no_fence_feedback,
+   no_semaphore_feedback,no_query_feedback` (el feedback lee una ranura en memoria compartida) y `export_syncobj` devolviendo un `eventfd` ya legible
+   (el fd real de `VCMD_SYNC_WAIT` se señalaba detrás del trabajo que lo esperaba). El kernel 5.15 no tiene `DMA_BUF_IOCTL_{EXPORT,IMPORT}_SYNC_FILE`.
+   El servidor vtest tampoco ponía `--multi-clients`: solo atendía a un cliente a la vez (KWin, kded6, plasmashell...).
+7. **Causa de que todo dibujo de Zink no escribiera nada** (la que faltaba): el Vulkan de Samsung (Mali-G68) aplica `vkCmdSetDepthCompareOp` **aunque la
+   prueba de profundidad esté desactivada**. Zink emite `vkCmdSetDepthCompareOp(NEVER)` con `vkCmdSetDepthTestEnable(FALSE)` en cada dibujo, y con NEVER o
+   LESS ningún fragmento pasa. Hallado quitando de las pipelines de Zink un estado dinámico cada vez (`X400_DYN_OFF`): solo `DEPTH_COMPARE_OP` cambiaba el
+   resultado. Reproducido sin Zink con `x400/test/vk-dynrender.c DEPTHOP=n` (0 y 1 no dibujan; 2, 3 y 7 sí). Arreglo: la capa `x400/venus/layer` manda
+   `ALWAYS` al driver mientras la prueba está apagada. Con él, `gl-readback`, `gl-vertexid` y KWin pintan.
+   Lo descartado por el camino (≈30 pruebas, todas con `PIXELS OK` en el Vulkan de Samsung): renderizado dinámico, `extended_dynamic_state` 1 y 2, buffer
+   de vértices, `BindVertexBuffers2`, SPIR-V de Zink, `LOAD` tras un clear, barreras, varios command buffers, semáforo de línea de tiempo, motor "mesa zink",
+   imagen mutable, suballocación, memoria, descriptores, características de `vkCreateDevice`. Una prueba de oclusión (`any_samples_passed`) resultó **no
+   fiable**: da 0 también en lavapipe, que dibuja bien.
+
+### Qué hacen otros proyectos (leído en sus repositorios; nada de esto se probó aquí)
+- **Venus por vtest en Android** (DroidDeck #165, gogetwoo, Pixel 10/PowerVR): mismos obstáculos —sin import de dma-buf en vtest, sin `external_semaphore_fd`—;
+  hicieron la sincronización explícita opcional y concluyen que el import de dma-buf es el coste principal de este camino.
+- **libhybris** (ARLinux, taowen; Mali G1-Ultra): un proceso glibc carga el Vulkan del fabricante; el driver nativo importa dma-buf. Es el camino más usado hoy en Mali.
+- **PanVK sobre kbase** (JimVulkan/mali-panvk: Mali-G68 en Galaxy Tab S9 FE, MIT; SaicharanKandukuri/tensor-g1-proot-gpu: Ubuntu en PRoot, G78): Mesa PanVK
+  habla directo con `/dev/mali0`. Para presentar usan memoria de `/dev/dma_heap/system` importada en kbase (`KBASE_IOCTL_MEM_IMPORT` tipo UMM) y esperan a la GPU en
+  la CPU antes de presentar: **es lo mismo que ya tenemos con `vkr-dma-heap.patch`**. Límites: su WSI es de X11 con un protocolo privado de Termux:X11 (KWin-Wayland no lo
+  tiene), `kbase_kmod_bo_export` no está implementado, y con Zink solo llegan a OpenGL 2.1 (KWin 6 pide 3.1). Avisan de reinicios del kernel con kbase en contenedores.
+  Ninguno de los dispositivos de la guía de chroot es Exynos/G68.

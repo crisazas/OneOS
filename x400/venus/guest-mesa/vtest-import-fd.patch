@@ -1,5 +1,5 @@
---- a/src/virtio/vulkan/vn_renderer_vtest.c	2026-11-22 16:25:51.316034405 -0600
-+++ b/src/virtio/vulkan/vn_renderer_vtest.c	2026-11-22 16:25:51.316941678 -0600
+--- a/src/virtio/vulkan/vn_renderer_vtest.c	2026-11-22 16:28:48.399597817 -0600
++++ b/src/virtio/vulkan/vn_renderer_vtest.c	2026-11-22 16:28:48.400718345 -0600
 @@ -349,6 +349,51 @@
     return res_id;
  }
@@ -115,3 +115,20 @@
     vtest->base.bo_ops.destroy = vtest_bo_destroy;
     vtest->base.bo_ops.export_dma_buf = vtest_bo_export_dma_buf;
     vtest->base.bo_ops.export_sync_file =
+--- a/src/virtio/vtest/vtest_protocol.h	2026-11-22 16:28:42.570937211 -0600
++++ b/src/virtio/vtest/vtest_protocol.h	2026-11-22 16:28:42.611129085 -0600
+@@ -94,6 +94,14 @@
+ #define VCMD_DRM_SYNC_TRANSFER 37
+ #define VCMD_RESOURCE_EXPORT_FD 38
+ 
++/* linux-x400: import a dma-buf the guest owns as a resource the renderer can use (see x400/venus/vtest-import.patch).
++ * The dma-buf rides as SCM_RIGHTS on one extra byte after the request; resp: res_id. 64 is clear of 25..38. */
++#define VCMD_RESOURCE_IMPORT_FD 64
++#define VCMD_RES_IMPORT_FD_SIZE 3
++#define VCMD_RES_IMPORT_FD_TYPE 0
++#define VCMD_RES_IMPORT_FD_SIZE_LO 1
++#define VCMD_RES_IMPORT_FD_SIZE_HI 2
++
+ #define VCMD_RES_CREATE_SIZE 10
+ #define VCMD_RES_CREATE_RES_HANDLE 0 /* must be 0 since protocol version 3 */
+ #define VCMD_RES_CREATE_TARGET 1
