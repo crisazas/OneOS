@@ -70,6 +70,25 @@ for g in "$STAGE"/x400/groups/*/; do
     mkdir -p "$R/tmp/x400/$gn"; $BB mount --bind "$g" "$R/tmp/x400/$gn" && say "group $gn bound at /tmp/x400/$gn"
     [ -f "$g/host.sh" ] && { sh "$g/host.sh" > "$D/logs/group-$gn.log" 2>&1 & say "group $gn host.sh started ($!)"; }
 done
+# One UI's own shared storage (DCIM, Download, Documents, ...: Android's /data/media/0), at /mnt/oneui in the guest, read and write. OneOS shares only six
+# folders and only on request (ONEOS_SHARE_FILES, guest_start.sh of switcher/assets) because in its run 25 the guest's cleanup of a user it could not prepare
+# deleted the photos: a deletion from Linux here is a real deletion of the phone's files. Nothing in this repo runs chown/chmod/rm -r over /mnt/oneui.
+# It is the pass-through view (no FUSE, so no per-app rules, thumbnails or Android/data protection); the files belong to u0_aNNN:media_rw, and root sees them.
+# X400_SHARE=ro mounts it read-only, X400_SHARE=0 does not mount it. The bind is made in this private namespace and goes with the session.
+case "${X400_SHARE:-rw}" in
+    0) say "One UI's storage: not shared (X400_SHARE=0)" ;;
+    *)
+        SHR=/mnt/pass_through/0/emulated/0
+        if [ -d "$SHR/" ] && mkdir -p "$R/mnt/oneui" && $BB mount --bind "$SHR" "$R/mnt/oneui" && $BB mount --make-private "$R/mnt/oneui"; then
+            if [ "${X400_SHARE:-rw}" = ro ]; then
+                $BB mount -o remount,bind,ro "$R/mnt/oneui" "$R/mnt/oneui" && say "One UI's storage at /mnt/oneui, read only" || say "WARNING: could not make /mnt/oneui read only"
+            else
+                say "One UI's storage at /mnt/oneui, READ AND WRITE (X400_SHARE=ro for read only)"
+            fi
+        else
+            say "One UI's storage: not reachable at $SHR; /mnt/oneui not mounted"
+        fi ;;
+esac
 say "guest filesystems ready: $(grep -c " $R" /proc/mounts) mounts under $R"
 
 # The display. OneOS stopped One UI's surfaceflinger and its watcher keeps init's copy stopped; the desktop's layer needs a

@@ -35,6 +35,7 @@ public final class X400Display {
         // With One UI's framework stopped nobody asks surfaceflinger to power the panel (POWER_MODE_NORMAL, 2), and the panel
         // stays dark though the layer is composed.
         if (power) powerOn();
+        setProjection(w, h);
         Object layer = null, queue = null, surface = null;
         int result;
         try {
@@ -68,28 +69,54 @@ public final class X400Display {
         return result < 0 ? 4 : 0;
     }
 
+    private static Object displayToken() throws Exception {
+        try {
+            String jars = System.getenv("SYSTEMSERVERCLASSPATH");
+            if (jars == null || jars.isEmpty()) jars = "/system/framework/services.jar";
+            ClassLoader loader = (ClassLoader) Class.forName("dalvik.system.PathClassLoader")
+                .getConstructor(String.class, ClassLoader.class).newInstance(jars, ClassLoader.getSystemClassLoader());
+            Class<?> control = loader.loadClass("com.android.server.display.DisplayControl");
+            Method load = Runtime.class.getDeclaredMethod("loadLibrary0", Class.class, String.class);
+            load.setAccessible(true);
+            load.invoke(Runtime.getRuntime(), control, "android_servers");
+            long[] ids = (long[]) control.getMethod("getPhysicalDisplayIds").invoke(null);
+            return control.getMethod("getPhysicalDisplayToken", long.class).invoke(null, ids[0]);
+        } catch (Throwable older) {
+            long[] ids = (long[]) SC.getMethod("getPhysicalDisplayIds").invoke(null);
+            return SC.getMethod("getPhysicalDisplayToken", long.class).invoke(null, ids[0]);
+        }
+    }
+
     private static void powerOn() {
         try {
-            Object token;
-            try {
-                String jars = System.getenv("SYSTEMSERVERCLASSPATH");
-                if (jars == null || jars.isEmpty()) jars = "/system/framework/services.jar";
-                ClassLoader loader = (ClassLoader) Class.forName("dalvik.system.PathClassLoader")
-                    .getConstructor(String.class, ClassLoader.class).newInstance(jars, ClassLoader.getSystemClassLoader());
-                Class<?> control = loader.loadClass("com.android.server.display.DisplayControl");
-                Method load = Runtime.class.getDeclaredMethod("loadLibrary0", Class.class, String.class);
-                load.setAccessible(true);
-                load.invoke(Runtime.getRuntime(), control, "android_servers");
-                long[] ids = (long[]) control.getMethod("getPhysicalDisplayIds").invoke(null);
-                token = control.getMethod("getPhysicalDisplayToken", long.class).invoke(null, ids[0]);
-            } catch (Throwable older) {
-                long[] ids = (long[]) SC.getMethod("getPhysicalDisplayIds").invoke(null);
-                token = SC.getMethod("getPhysicalDisplayToken", long.class).invoke(null, ids[0]);
-            }
-            SC.getMethod("setDisplayPowerMode", Class.forName("android.os.IBinder"), int.class).invoke(null, token, 2);
+            SC.getMethod("setDisplayPowerMode", Class.forName("android.os.IBinder"), int.class).invoke(null, displayToken(), 2);
             log("panel powered on (POWER_MODE_NORMAL)");
         } catch (Throwable refused) {
             log("the panel could not be powered on (" + refused + ")");
+        }
+    }
+
+    // One UI's framework (stopped) is what normally gives the panel its landscape projection; our own surfaceflinger starts with the panel's native
+    // portrait one (ROTATION_0, 1320x2112) and then this landscape layer (2112x1320) is shown squeezed and cut. Turn the display 90 like One UI has it.
+    // Same call DisplayManagerService makes (setDisplayProjection(ROTATION_90, layerStackRect, displayRect)); needs only surfaceflinger.
+    private static void setProjection(int w, int h) {
+        try {
+            Class<?> R = Class.forName("android.graphics.Rect");
+            Object rect = R.getConstructor(int.class, int.class, int.class, int.class).newInstance(0, 0, w, h);
+            Object token = displayToken();
+            Object tx = TX.getConstructor().newInstance();
+            Method m = null;
+            try {
+                m = TX.getMethod("setDisplayProjection", Class.forName("android.os.IBinder"), int.class, R, R);
+                m.invoke(tx, token, 1 /* ROTATION_90 */, rect, rect);
+            } catch (Throwable onTransaction) {
+                m = SC.getMethod("setDisplayProjection", Class.forName("android.os.IBinder"), int.class, R, R);
+                m.invoke(null, token, 1, rect, rect);
+            }
+            TX.getMethod("apply").invoke(tx);
+            log("display projection ROTATION_90 " + w + "x" + h + " (via " + m.getDeclaringClass().getSimpleName() + ")");
+        } catch (Throwable refused) {
+            log("the display projection could not be set (" + refused + ")");
         }
     }
 
