@@ -1,6 +1,6 @@
 # G3 audio: result
 
-**Status: the chain runs end to end on Android, but sound is NOT confirmed.** With Android's
+**Status: the software chain runs end to end (guest -> bridge -> Android -> amplifier); that the speaker emits sound is NOT confirmed (verdict in "Phase 3").** With Android's
 `audioserver` running, AAudio playback reaches the Awinic amplifiers (`start_pa: start success`), but
 the microphone never measured the tone. See "Phase 2" at the end. Phase 1 (below) was done with
 `audioserver` stopped: the raw ALSA path cannot work without it.
@@ -170,3 +170,118 @@ stereo); `x400-audiod` (NDK, AAudio, as `x400-aaudio` already opens the streams)
 small program using `pw-cat --playback/--record` on the socket, or a libpipewire client creating "Altavoces" and
 "Microfono" nodes. Keep `pipewire.conf.d/50-x400-alsa.conf` out of it: with audioserver owning the PCMs the
 guest must not open `hw:0,7`.
+
+## Phase 3: independent proofs, verdict, bridge
+
+Owner away, nobody can listen. Output limit for this round: 15 % (all tests <= 15 %; the bridge test ran with
+`X400_MAXAMP=5`). Every stream is closed at the end; the amp's own `aw_dev_*_volume` was never touched (0).
+
+### (1) Is the microphone muted by Android?  No.
+The capture returns live noise, not zeros. s16 samples of the earlier recordings (`x400-aaudio rec`, 48 kHz):
+
+| preset | samples | exact zeros | distinct values | min..max |
+|---|---|---|---|---|
+| VOICE_RECOGNITION (default) | 144000 | 3.7 % | 367 | -208..215 |
+| CAMCORDER (the bridge's) | 468960 frames | - | 1286 distinct, 77 % non-zero in the guest WAV | -651..751 |
+| UNPROCESSED (7) | 96000 | 11.6 % | 26 | -13..12 |
+| UNPROCESSED-like (10) | 96000 | 14.8 % | 26 | -14..11 |
+
+No `silenced` / `not allowed` / `concurrent capture` line in logcat for AudioFlinger/APM/audio_hw; the HAL
+routes `recognition-mic` / `recording-mic` (DMIC1 -> `pcmC0D110c`) and AAudio reads normally. (One cost: the first
+`createRecord` and `start` take 5 s each in `audioserver`, `Binder transaction ... took 5025 ms`, the framework's
+appops/audio service not being there.) So the mic works and hears the room; it just did not hear the tone.
+The raw ALSA capture of the HAL's own PCMs (`pcmC0D118c` SPKAMP reference, `D110c`) cannot be opened by me while
+the HAL has them: `x400-snd cap` times out (rc=124), so no second reader.
+
+### (2a) Amplifier readings during the tone: no difference between a tone and silence
+- Awinic's DSP logs `awinic_get_big_data [max_excursion max_temp ...]` every second (A-Box log,
+  `amp-excursion.sh`). Idle `0 20480`; once a stream is open `133934 29869` (L) / `181121 29875` (R).
+  The values are **identical with a 0 % stream, 2 %, 5 %, 15 %, at 150 Hz and 1 kHz**: they come from the stream
+  starting, not from the signal. Not evidence of sound.
+- `te` (coil temperature estimate) and `dsp_re` (resistance estimate, 6270/6280 = Awinic fixed-point, not
+  ohm): same sequence for a 0 % stream and a 15 % tone (`amp-monitor.sh`: te 27 -> 21, re 6270/6280 in both).
+  Again the stream start, not the load.
+- Amp registers (`/sys/bus/i2c/devices/2-0034/reg`): reg 0x01 `0x0000 -> 0x0211` and 0x03/0x04 change when a stream
+  opens; they are the same at 0 % and 15 %. So "the amplifier is on and clocked" is proven (phase 2),
+  "it drives current into a coil" is not.
+
+### (2b) Accelerometer: no signal above the sensor's own noise
+`x400-accel` (reads `ssp_sensor/enable` first, writes `11` in one write, switches it back with `10` only if it was
+off; it was `0` before and `0` after). **The sensor delivers only ~13 fresh samples/s** (the sysfs `raw_data` changes
+13 times a second; 150 000 reads/s return the same value), so a 100 Hz vibration cannot be seen directly. I
+tried: a 100 Hz tone at 15 %, 3 rounds, silence vs tone, std of the axes (LSB, 4096 = 1 g) over 4 s:
+
+| | silence x/y/z | 100 Hz tone x/y/z |
+|---|---|---|
+| round 1 | 2.50 / 2.53 / 4.70 | 2.82 / 2.54 / 3.56 |
+| round 2 | 2.47 / 2.00 / 4.76 | 2.27 / 2.20 / 4.13 |
+| round 3 | 2.28 / 2.09 / 3.74 | 2.70 / 2.70 / 2.96 |
+
+No rise (z goes down in all three). Then a 2 Hz on/off 100 Hz tone, to put the modulation inside the sensor's
+band, 3 rounds: z 4.66/4.45/4.20 silent vs 4.26/3.85/3.27 playing, again no rise. Not reproducible, not
+physical evidence. (A 15 % full-scale 100 Hz sine from a tablet speaker is also a tiny force; the test is weak,
+not proof of silence.)
+
+### (2c) Microphone, with the tone envelope (modulated)
+White noise 15 % keyed at 1 Hz for 20 s, mic recording at the same time: the 1 Hz component of the mic RMS
+envelope is 0.55x the neighbouring frequencies (silence recorded alone: 1.24x). Nothing locked to the playback.
+
+### (3) Verdict: **sound is NOT confirmed.**
+Four independent probes (mic tone ratio at 5-50 %, mic envelope lock-in, amplifier excursion/te/re, accelerometer)
+saw nothing that depends on the signal. What *is* confirmed: the amplifiers start, the I2S clock exists, the
+Awinic IV-sense loop runs, AudioFlinger plays the track without xruns, the microphone is not muted. What is **not**
+known: whether the speaker moves air. I cannot tell "silent" from "my probes are too weak". The only decisive test
+needs a person: `adb shell su -c "/data/local/tmp/x400-aaudio tone 1000 5 5"` next to the tablet (no other tool of
+mine can substitute for ears). Also not tried: the amplifier's `aw_dev_*_volume`/`rcv_volume` controls (both 0 here,
+and the HAL does not set them either: it relies on the DSP and the A-Box gain), `ABOX SPUS0 PREGAIN FUNC=MUTE` in
+the list (not played with).
+
+### (4) The bridge works, apart from sound being unverified
+- `x400-audiod.c` (Android, NDK, AAudio): `x400-audio-out.sock` (s16le 48000 stereo -> speaker) and `x400-audio-in.sock`
+  (microphone, mono duplicated to stereo -> guest) in the guest's `/tmp`. It opens AAudio only while a client is
+  connected and closes it when the client leaves; it logs per second bytes/frames/RMS/peak. `X400_MAXAMP=<percent>`
+  caps the output level (used: 5).
+- `x400-pwbridge.c` (guest, libpipewire 1.6.2 against `out/rootfs-plasma`): nodes `x400.altavoces` ("Altavoces",
+  `Audio/Sink`) and `x400.microfono` ("Microfono", `Audio/Source`), each connecting its socket only while the stream
+  is `streaming`.
+- Tested end to end in the guest with a throw-away PipeWire + WirePlumber (live session untouched):
+  `pw-cat -p --target x400.altavoces tono.wav` (1 kHz, 4 s, 10 %) -> bridge `Altavoces: paused -> streaming, socket
+  connected ... socket closed (770048 bytes this session)` -> audiod log `out: client connected, stream open` ...
+  `769920 bytes, 192480 frames, rms=0.00172 peak=0.0050 ... client gone, stream closed`. 770 KB = 4 s x 48000 x 4 B
+  (+ small tail); peak 0.0050 = 10 % x the 5 % ceiling, as designed.
+- Microphone direction: `pw-cat -r --target x400.microfono` gave a WAV of 1.2 M frames, 77 % non-zero samples, 1286 distinct
+  values, min/max -651/751 (real room noise from the DMIC, no zeros). The first record start takes ~5 s on Android
+  (see above) so the first seconds of a capture are silence.
+- The nodes carry `node.pause-on-idle`/`suspend-on-idle`: no stream, no socket, no AAudio, so no amplifier power.
+- Not tested: the live session's WirePlumber linking them to apps (I used the isolated one, so `pw-cat --target` was
+  explicit), latency (~10-20 ms per hop expected, not measured), glitch-free long playback, 44.1 kHz sources (PipeWire
+  resamples to 48k; fine).
+
+### (5) Staging (`x400/audio/stage/`)
+- `host.sh` (runs outside the chroot as root, in `guest_start.sh`'s mount namespace): removes `guest_audio.flag`, starts
+  `audioserver` if it is not running and waits for `media.audio_policy`, starts `x400-audiod`, then loops every 2 s
+  re-doing that while the guest is mounted. Tested from `guest_start.sh`'s mount namespace (`nsenter -t 8091 -m`):
+  removed the flag, audiod up on `/data/local/tmp/oneos/rootfs/tmp/x400-audio-*.sock`, served the `pw-cat` test above.
+  Caveat found: from a different namespace that path is the read-only mount point (`Read-only file system`);
+  `host.sh` falls back to `/proc/<kwin>/root/tmp`.
+- `guest.sh`: waits for `$XDG_RUNTIME_DIR/pipewire-0`, then `exec /tmp/x400/audio/x400-pwbridge --dir /tmp`.
+- Binaries: `x400-audiod`, `x400-pwbridge`, `x400-snd` (build: `build.sh` and `build-android.sh`; they are small and the stage
+  convention of the other groups ships binaries).
+- The flag loop (`oneos_switch.sh:1561`) re-stops `audioserver` every second **while the flag exists**; `host.sh`
+  removes the flag and re-checks every 2 s, so a brief flag at the start can stop it for a moment, then it is started
+  again. The clean fix is on G0's side: start the switch with `ONEOS_GUEST_AUDIO=0` (it never writes the flag and does
+  `setprop ctl.start audioserver` itself). I did not edit `oneos_switch.sh` or `guest_start.sh`.
+
+### What G0 must wire (exact)
+1. `session-inner.sh`, after PipeWire and WirePlumber: `sh /tmp/x400/audio/guest.sh &`
+2. Preferably when launching OneOS: `ONEOS_GUEST_AUDIO=0 ONEOS_RETURN_MODE=inplace sh oneos_switch.sh`
+   (README "Run" has the command without it). Otherwise `host.sh` copes with the flag.
+3. `x400/oneos/deploy.sh` already pushes `x400/audio/stage/` to `groups/audio/`; nothing else to add. The audio group needs
+   no extra package beyond the rootfs's pipewire, wireplumber and pw-cat.
+4. Remove `x400/audio/pipewire.conf.d/50-x400-alsa.conf` from the plan: with `audioserver` owning the PCMs the guest
+   must not open `hw:0,7`.
+
+### Left as found
+`guest_audio.flag` deleted (as in phase 2); `audioserver` running; the accelerometer `enable` back at `0`; debugfs
+unmounted; the live PipeWire/WirePlumber (16707/16957) never touched; test PipeWire, WirePlumber, bridge and `audiod`
+processes stopped and their files in the guest's /tmp removed.

@@ -62,6 +62,11 @@ static void *play_thread(void *p)
 	while (done < total && !stop_flag) {
 		for (int i = 0; i < 480; i++, ph += st) {
 			double fade = done + i < RATE / 20 ? (double)(done + i) / (RATE / 20) : 1.0;
+			if (getenv("X400_PULSE")) {
+				/* on/off at X400_PULSE Hz (square), to put speaker motion inside the accelerometer's band */
+				double ph2 = fmod((double)(done + i) * atof(getenv("X400_PULSE")) / RATE, 1.0);
+				if (ph2 >= 0.5) fade = 0;
+			}
 			double w = getenv("X400_NOISE") ? (rand() / (double)RAND_MAX) * 2 - 1 : sin(ph);
 			int16_t v = (int16_t)(w * a->amp * fade * 32767);
 			buf[i * 2] = buf[i * 2 + 1] = v;
