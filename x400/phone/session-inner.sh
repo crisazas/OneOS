@@ -62,6 +62,17 @@ export QT_LOGGING_RULES="kwin_screencast.debug=true;kwin_core.debug=true;kwin_sc
 eval $KWIN --virtual --no-lockscreen --width 2112 --height 1320 --socket wayland-x400 > /tmp/kwin.log 2>&1 &
 sleep 6
 export WAYLAND_DISPLAY=wayland-x400 QT_QPA_PLATFORM=wayland
+# KWin's virtual output has one mode, 60 Hz; the panel does 90. Add a 90 Hz mode and make it the current one before Plasma and the capture start (X400_HZ=60 keeps 60)
+HZ=${X400_HZ:-90}
+if [ "$HZ" != 60 ] && command -v kscreen-doctor >/dev/null; then
+  n=0; while [ $n -lt 10 ]; do
+    kscreen-doctor -o 2>/dev/null | grep -a -q "2112x1320@$HZ" || kscreen-doctor output.1.addCustomMode.2112.1320.${HZ}000.full > /dev/null 2>&1
+    kscreen-doctor output.1.mode.2112x1320@$HZ > /tmp/hz.log 2>&1
+    kscreen-doctor -o 2>/dev/null | grep -a -E 'Modes' | grep -a -q "2112x1320@$HZ[.0-9]*\S*\*" && break
+    n=$((n + 1)); sleep 1
+  done
+  echo "x400: output mode $(kscreen-doctor -o 2>/dev/null | grep -a Modes | grep -a -o '[0-9x]*@[0-9.]*[^ ]*[*]' | head -1) after $n retries" >> /tmp/gpu-choice.txt
+fi
 $L/kglobalacceld > /tmp/kga.log 2>&1 &
 kded6 > /tmp/kded.log 2>&1 &
 sleep 3
