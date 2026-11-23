@@ -44,7 +44,7 @@ static struct bufinfo *infos[32]; static uint32_t next_id = 1;
 static int lsock = -1, csock = -1;
 static struct spa_source *lsrc, *csrc;
 static struct pw_buffer *inflight, *pending;
-static uint64_t sent_frames, copied_frames, raced, race_checked;
+static uint64_t sent_frames, copied_frames, raced, race_checked, replaced, arrived;
 static int negotiated_dmabuf, racecheck;
 
 static void count_frame(void)
@@ -54,6 +54,7 @@ static void count_frame(void)
     double dt = (t1.tv_sec - t0.tv_sec) + (t1.tv_nsec - t0.tv_nsec) * 1e-9;
     fprintf(stderr, "capture: %llu frames, %.1f fps over the last %.1f s (%llu by descriptor, %llu copied; %s)", (unsigned long long)frames, 120 / dt, dt,
             (unsigned long long)sent_frames, (unsigned long long)copied_frames, negotiated_dmabuf ? "dma-buf" : "shared memory");
+    if (sent_frames) fprintf(stderr, "; from KWin %llu, replaced while the helper had one %llu", (unsigned long long)arrived, (unsigned long long)replaced);
     if (racecheck) fprintf(stderr, "; race check: %llu of %llu frames still changing 15 ms after they arrived", (unsigned long long)raced, (unsigned long long)race_checked);
     fputc('\n', stderr);
     t0 = t1;
@@ -178,7 +179,8 @@ static void on_param(void *d, uint32_t id, const struct spa_pod *param)
   if (!param || id != SPA_PARAM_Format) return;
   spa_format_video_raw_parse(param, &vinfo);
   const struct spa_pod_prop *mp = spa_pod_find_prop(param, NULL, SPA_FORMAT_VIDEO_modifier);
-  fprintf(stderr, "capture: format %u (BGRx=%u BGRA=%u) %ux%u%s\n", vinfo.format, SPA_VIDEO_FORMAT_BGRx, SPA_VIDEO_FORMAT_BGRA, vinfo.size.width, vinfo.size.height, mp ? ", dma-buf" : ", shared memory");
+  fprintf(stderr, "capture: format %u (BGRx=%u BGRA=%u) %ux%u%s, framerate %u/%u, max framerate %u/%u\n", vinfo.format, SPA_VIDEO_FORMAT_BGRx, SPA_VIDEO_FORMAT_BGRA, vinfo.size.width, vinfo.size.height,
+          mp ? ", dma-buf" : ", shared memory", vinfo.framerate.num, vinfo.framerate.denom, vinfo.max_framerate.num, vinfo.max_framerate.denom);
   // with a dma-buf KWin first sends the modifiers it can still pick from, then the one it chose: the buffers are asked for on the second
   if (mp && (mp->flags & SPA_POD_PROP_FLAG_DONT_FIXATE) && SPA_POD_CHOICE_N_VALUES(&mp->value) > 1) return;
   negotiated_dmabuf = mp != NULL;
@@ -204,6 +206,7 @@ static void on_process(void *d)
   while ((n = pw_stream_dequeue_buffer(stream))) { pw_stream_queue_buffer(stream, b); b = n; }
   struct spa_data *sd = &b->buffer->datas[0];
   int dmabuf = sd->type == SPA_DATA_DmaBuf;
+  arrived++;
   if (map && sd->chunk->size && !(sd->chunk->flags & SPA_CHUNK_FLAG_CORRUPTED) && (sd->data || dmabuf)) {
     struct fb_header *h = (struct fb_header *)map;
     if (racecheck && dmabuf) {
@@ -218,7 +221,7 @@ static void on_process(void *d)
     }
     if (csock >= 0 && (sd->type == SPA_DATA_MemFd || dmabuf) && b->user_data) {
       if (!inflight) { if (send_frame(b) < 0) { pw_stream_queue_buffer(stream, b); drop_client(); return; } }
-      else { if (pending) pw_stream_queue_buffer(stream, pending); pending = b; }
+      else { if (pending) { pw_stream_queue_buffer(stream, pending); replaced++; } pending = b; }
       __atomic_store_n(&h->seq, ++seq, __ATOMIC_RELEASE);
       count_frame();
       return;
