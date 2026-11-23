@@ -58,8 +58,17 @@ if [ -f "$STAGE/x400/libvulkan_virtio.so" ]; then
     VL=$(ls "$R"/usr/lib/aarch64-linux-gnu/libvulkan_virtio.so 2>/dev/null)
     [ -n "$VL" ] && $BB mount --bind "$STAGE/x400/libvulkan_virtio.so" "$VL" && say "libvulkan_virtio with dma-buf import bound over $VL"
 fi
-for f in capture inputd session-inner.sh cpu-sample.sh; do
+for f in capture inputd keys session-inner.sh cpu-sample.sh; do
+    [ -f "$STAGE/x400/$f" ] || continue
     : > "$R/tmp/$f"; $BB mount --bind "$STAGE/x400/$f" "$R/tmp/$f"
+done
+# Each hardware group (x400/HARDWARE.md) ships what it needs in $STAGE/x400/groups/<name>/: executables and config for the guest are
+# bound under /tmp/x400/<name>; host.sh (if there) runs here, outside the chroot, as root, before the desktop starts.
+mkdir -p "$R/tmp/x400"
+for g in "$STAGE"/x400/groups/*/; do
+    [ -d "$g" ] || continue; gn=$(basename "$g")
+    mkdir -p "$R/tmp/x400/$gn"; $BB mount --bind "$g" "$R/tmp/x400/$gn" && say "group $gn bound at /tmp/x400/$gn"
+    [ -f "$g/host.sh" ] && { sh "$g/host.sh" > "$D/logs/group-$gn.log" 2>&1 & say "group $gn host.sh started ($!)"; }
 done
 say "guest filesystems ready: $(grep -c " $R" /proc/mounts) mounts under $R"
 

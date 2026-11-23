@@ -45,7 +45,7 @@ INC=/data/local/tmp/x400_incoming
 adb_ shell "mkdir -p $INC"
 adb_ push "$ROOT/x400/oneos/guest_prepare.sh" "$ROOT/x400/oneos/guest_start.sh" "$INC/" >/dev/null
 adb_ push "$ROOT/out/display/x400-display.dex" "$ROOT/out/display/libx400display.so" "$ROOT/x400/display/display.sh" \
-         "$ROOT/x400/display/bin/capture" "$ROOT/x400/display/bin/inputd" "$ROOT/x400/phone/session-inner.sh" \
+         "$ROOT/x400/display/bin/capture" "$ROOT/x400/display/bin/inputd" $([ -f "$ROOT/out/input/keys" ] && echo "$ROOT/out/input/keys") "$ROOT/x400/phone/session-inner.sh" \
          "$ROOT/x400/phone/cpu-sample.sh" "$INC/" >/dev/null
 # the server with VCMD_RESOURCE_IMPORT_FD (x400/venus/vtest-import.patch) when it was built, else the plain one
 VT=$ROOT/out/venus-build-import/virgl_test_server; [ -f "$VT" ] || VT=$ROOT/out/venus-build/virgl_test_server
@@ -58,8 +58,15 @@ if [ -f "$ROOT/out/mesa-guest/libvulkan_virtio.so" ]; then
     su_ "mkdir -p $STAGE/x400 && cp -f $INC/libvulkan_virtio.so $STAGE/x400/libvulkan_virtio.so && chmod 644 $STAGE/x400/libvulkan_virtio.so && chcon u:object_r:apex_data_file:s0 $STAGE/x400/libvulkan_virtio.so"
 fi
 su_ "cp -f $INC/guest_prepare.sh $INC/guest_start.sh $STAGE/ && chmod 755 $STAGE/guest_prepare.sh $STAGE/guest_start.sh && \
-     mkdir -p $STAGE/x400 && cd $INC && cp -f x400-display.dex libx400display.so display.sh capture inputd session-inner.sh cpu-sample.sh x400vt $STAGE/x400/ && \
+     mkdir -p $STAGE/x400 && cd $INC && cp -f x400-display.dex libx400display.so display.sh capture inputd $([ -f keys ] && echo keys) session-inner.sh cpu-sample.sh x400vt $STAGE/x400/ && \
      chmod 755 $STAGE/x400/* && chown -R 0:0 $STAGE/x400 $STAGE/guest_prepare.sh $STAGE/guest_start.sh && rm -rf $INC"
+# what each hardware group ships (x400/HARDWARE.md): x400/<group>/stage/ goes to $STAGE/x400/groups/<group>/ as it is
+for gd in "$ROOT"/x400/*/stage; do
+    [ -d "$gd" ] || continue; gn=$(basename "$(dirname "$gd")")
+    tar -C "$gd" -cf /tmp/x400-group-$gn.tar . && adb_ push /tmp/x400-group-$gn.tar /data/local/tmp/x400-group-$gn.tar >/dev/null
+    su_ "rm -rf $STAGE/x400/groups/$gn && mkdir -p $STAGE/x400/groups/$gn && /data/adb/ksu/bin/busybox tar -C $STAGE/x400/groups/$gn -xf /data/local/tmp/x400-group-$gn.tar && chown -R 0:0 $STAGE/x400/groups/$gn && chmod -R a+rX $STAGE/x400/groups/$gn && rm -f /data/local/tmp/x400-group-$gn.tar"
+    rm -f /tmp/x400-group-$gn.tar; echo "group $gn staged"
+done
 if [ -d "$ROOT/out/mesa25/root" ]; then
     # one tar: faster than pushing 9000 small files, and the stage's copy is replaced as a whole
     tar -C "$ROOT/out/mesa25/root" -cf /tmp/x400-mesa25.tar .
