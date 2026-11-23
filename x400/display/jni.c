@@ -7,6 +7,7 @@
 #include <android/native_window.h>
 #include <android/native_window_jni.h>
 #include <errno.h>
+#define VK_USE_PLATFORM_ANDROID_KHR 1
 #include <fcntl.h>
 #include <jni.h>
 #include <poll.h>
@@ -20,13 +21,28 @@
 #include <sys/un.h>
 #include <time.h>
 #include <unistd.h>
+#include <vulkan/vulkan.h>
+#include <vulkan/vulkan_android.h>
 
 static volatile int stopping;
 static void on_signal(int n) { (void)n; stopping = 1; }
 
-// Frames by descriptor (fdframe.h): capture keeps a PipeWire buffer and sends its memfd; the pixels are read from there.
-struct fdbuf { uint32_t id; uint8_t *base; size_t size; };
+// Frames by descriptor (fdframe.h): capture keeps a PipeWire buffer and sends its descriptor. A memfd is read by the CPU and copied into the
+// layer (ANativeWindow_lock). A dma-buf is imported as a VkImage and copied into the layer's swapchain by the GPU (present mode mailbox: the thread
+// that has to answer DONE to capture never waits for the display). One surface cannot have both: the path is chosen once, from the first frame.
+struct fdbuf { uint32_t id; uint8_t *base; size_t size; VkImage img; VkDeviceMemory mem; };
 static struct fdbuf fdbufs[32];
+
+#define VKP_FRAMES 2
+static struct {
+  int up, failed; VkInstance inst; VkPhysicalDevice pd; VkDevice dev; VkQueue q; VkSurfaceKHR surf; VkSwapchainKHR sc; VkCommandPool pool;
+  VkImage imgs[16]; uint32_t nimg; VkExtent2D ext; VkFormat fmt;
+  struct { VkCommandBuffer cb; VkSemaphore acq, done; VkFence fence; } f[VKP_FRAMES]; uint32_t cur;
+  PFN_vkGetMemoryFdPropertiesKHR getFdProps;
+  uint64_t blits, acquire_max_us, acquire_sum_us, submit_sum_us;
+} vk;
+
+static uint64_t now_us(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return (uint64_t)t.tv_sec * 1000000 + t.tv_nsec / 1000; }
 
 static int sock_open(const char *path)
 {
@@ -40,12 +56,144 @@ static int sock_open(const char *path)
 
 static void fdbuf_drop(uint32_t id)
 {
-  for (int i = 0; i < 32; i++) if (fdbufs[i].base && fdbufs[i].id == id) { munmap(fdbufs[i].base, fdbufs[i].size); memset(&fdbufs[i], 0, sizeof fdbufs[i]); }
+  for (int i = 0; i < 32; i++) if (fdbufs[i].id == id && (fdbufs[i].base || fdbufs[i].img)) {
+    if (fdbufs[i].img) { vkDeviceWaitIdle(vk.dev); vkDestroyImage(vk.dev, fdbufs[i].img, NULL); vkFreeMemory(vk.dev, fdbufs[i].mem, NULL); }
+    if (fdbufs[i].base) munmap(fdbufs[i].base, fdbufs[i].size);
+    memset(&fdbufs[i], 0, sizeof fdbufs[i]);
+  }
 }
 
-static void fdbuf_clear(void) { for (int i = 0; i < 32; i++) if (fdbufs[i].base) fdbuf_drop(fdbufs[i].id); }
+static void fdbuf_clear(void) { for (int i = 0; i < 32; i++) if (fdbufs[i].base || fdbufs[i].img) fdbuf_drop(fdbufs[i].id); }
+
+
+// ---- the Vulkan path ----
+static void vk_log(const char *what, VkResult r) { fprintf(stderr, "x400-display: vulkan: %s = %d\n", what, r); }
+#define VKC(x) do { VkResult r_ = (x); if (r_ != VK_SUCCESS) { vk_log(#x, r_); return -1; } } while (0)
+
+// Brings up the instance, device and a swapchain on the layer's window. Returns 0, or -1 (then the CPU path is used and Vulkan is left alone).
+static int vk_init(ANativeWindow *win, int width, int height)
+{
+  uint32_t ne = 0; vkEnumerateInstanceExtensionProperties(NULL, &ne, NULL);
+  VkExtensionProperties *ep = calloc(ne + 1, sizeof *ep); vkEnumerateInstanceExtensionProperties(NULL, &ne, ep);
+  int has = 0; for (uint32_t i = 0; i < ne; i++) if (!strcmp(ep[i].extensionName, "VK_KHR_android_surface")) has = 1;
+  free(ep);
+  if (!has) { fprintf(stderr, "x400-display: vulkan: no VK_KHR_android_surface\n"); return -1; }
+  VkApplicationInfo ai = { VK_STRUCTURE_TYPE_APPLICATION_INFO, .apiVersion = VK_API_VERSION_1_1 };
+  const char *iext[] = { "VK_KHR_surface", "VK_KHR_android_surface" };
+  VkInstanceCreateInfo ici = { VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO, .pApplicationInfo = &ai, .enabledExtensionCount = 2, .ppEnabledExtensionNames = iext };
+  VKC(vkCreateInstance(&ici, NULL, &vk.inst));
+  uint32_t n = 1; VKC(vkEnumeratePhysicalDevices(vk.inst, &n, &vk.pd));
+  VkAndroidSurfaceCreateInfoKHR asi = { VK_STRUCTURE_TYPE_ANDROID_SURFACE_CREATE_INFO_KHR, .window = win };
+  VKC(vkCreateAndroidSurfaceKHR(vk.inst, &asi, NULL, &vk.surf));
+  VkBool32 sup = 0; VKC(vkGetPhysicalDeviceSurfaceSupportKHR(vk.pd, 0, vk.surf, &sup)); if (!sup) { fprintf(stderr, "x400-display: vulkan: queue 0 cannot present\n"); return -1; }
+  float prio = 1; VkDeviceQueueCreateInfo qci = { VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO, .queueFamilyIndex = 0, .queueCount = 1, .pQueuePriorities = &prio };
+  const char *dext[] = { "VK_KHR_swapchain", VK_KHR_EXTERNAL_MEMORY_EXTENSION_NAME, VK_KHR_EXTERNAL_MEMORY_FD_EXTENSION_NAME, VK_EXT_EXTERNAL_MEMORY_DMA_BUF_EXTENSION_NAME,
+                         VK_EXT_IMAGE_DRM_FORMAT_MODIFIER_EXTENSION_NAME, VK_KHR_IMAGE_FORMAT_LIST_EXTENSION_NAME };
+  VkDeviceCreateInfo dci = { VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO, .queueCreateInfoCount = 1, .pQueueCreateInfos = &qci, .enabledExtensionCount = 6, .ppEnabledExtensionNames = dext };
+  VKC(vkCreateDevice(vk.pd, &dci, NULL, &vk.dev)); vkGetDeviceQueue(vk.dev, 0, 0, &vk.q);
+  vk.getFdProps = (PFN_vkGetMemoryFdPropertiesKHR)vkGetDeviceProcAddr(vk.dev, "vkGetMemoryFdPropertiesKHR");
+  VkCommandPoolCreateInfo cpi = { VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO, .flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT, .queueFamilyIndex = 0 };
+  VKC(vkCreateCommandPool(vk.dev, &cpi, NULL, &vk.pool));
+
+  VkSurfaceCapabilitiesKHR caps; VKC(vkGetPhysicalDeviceSurfaceCapabilitiesKHR(vk.pd, vk.surf, &caps));
+  if (!(caps.supportedUsageFlags & VK_IMAGE_USAGE_TRANSFER_DST_BIT)) { fprintf(stderr, "x400-display: vulkan: the surface cannot be a transfer destination\n"); return -1; }
+  uint32_t nf = 0; vkGetPhysicalDeviceSurfaceFormatsKHR(vk.pd, vk.surf, &nf, NULL); VkSurfaceFormatKHR sf[32]; if (nf > 32) nf = 32; vkGetPhysicalDeviceSurfaceFormatsKHR(vk.pd, vk.surf, &nf, sf);
+  VkColorSpaceKHR cs = 0; vk.fmt = VK_FORMAT_UNDEFINED;
+  // the swapchain of this driver is RGBA only; the frames are BGRA, so each one is blitted (a raw copy would swap red and blue)
+  for (uint32_t i = 0; i < nf; i++) if (sf[i].format == VK_FORMAT_B8G8R8A8_UNORM) { vk.fmt = sf[i].format; cs = sf[i].colorSpace; }
+  for (uint32_t i = 0; vk.fmt == VK_FORMAT_UNDEFINED && i < nf; i++) if (sf[i].format == VK_FORMAT_R8G8B8A8_UNORM) { vk.fmt = sf[i].format; cs = sf[i].colorSpace; }
+  if (vk.fmt == VK_FORMAT_UNDEFINED) { fprintf(stderr, "x400-display: vulkan: no BGRA or RGBA swapchain format\n"); return -1; }
+  uint32_t nm = 0; vkGetPhysicalDeviceSurfacePresentModesKHR(vk.pd, vk.surf, &nm, NULL); VkPresentModeKHR pm[16]; if (nm > 16) nm = 16; vkGetPhysicalDeviceSurfacePresentModesKHR(vk.pd, vk.surf, &nm, pm);
+  VkPresentModeKHR mode = VK_PRESENT_MODE_FIFO_KHR; int have_mailbox = 0;
+  for (uint32_t i = 0; i < nm; i++) if (pm[i] == VK_PRESENT_MODE_MAILBOX_KHR) have_mailbox = 1;
+  if (have_mailbox && !getenv("X400_FIFO")) mode = VK_PRESENT_MODE_MAILBOX_KHR;
+  vk.ext = caps.currentExtent.width == 0xffffffffu ? (VkExtent2D){ (uint32_t)width, (uint32_t)height } : caps.currentExtent;
+  uint32_t minimg = 5; if (minimg < caps.minImageCount) minimg = caps.minImageCount; if (caps.maxImageCount && minimg > caps.maxImageCount) minimg = caps.maxImageCount;
+  // preTransform IDENTITY: the surface reports ROTATE_90 as current and the picture would come out sideways and cropped
+  VkSwapchainCreateInfoKHR sci = { VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR, .surface = vk.surf, .minImageCount = minimg, .imageFormat = vk.fmt, .imageColorSpace = cs, .imageExtent = vk.ext,
+                                   .imageArrayLayers = 1, .imageUsage = VK_IMAGE_USAGE_TRANSFER_DST_BIT, .imageSharingMode = VK_SHARING_MODE_EXCLUSIVE,
+                                   .preTransform = (caps.supportedTransforms & VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR) ? VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR : caps.currentTransform,
+                                   .compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR, .presentMode = mode, .clipped = VK_TRUE };
+  VKC(vkCreateSwapchainKHR(vk.dev, &sci, NULL, &vk.sc));
+  vk.nimg = 0; vkGetSwapchainImagesKHR(vk.dev, vk.sc, &vk.nimg, NULL); if (vk.nimg > 16) vk.nimg = 16; vkGetSwapchainImagesKHR(vk.dev, vk.sc, &vk.nimg, vk.imgs);
+  VkCommandBufferAllocateInfo cbi = { VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO, .commandPool = vk.pool, .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY, .commandBufferCount = 1 };
+  VkSemaphoreCreateInfo sem = { VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO }; VkFenceCreateInfo fci = { VK_STRUCTURE_TYPE_FENCE_CREATE_INFO, .flags = VK_FENCE_CREATE_SIGNALED_BIT };
+  for (int i = 0; i < VKP_FRAMES; i++) { VKC(vkAllocateCommandBuffers(vk.dev, &cbi, &vk.f[i].cb)); VKC(vkCreateSemaphore(vk.dev, &sem, NULL, &vk.f[i].acq));
+                                         VKC(vkCreateSemaphore(vk.dev, &sem, NULL, &vk.f[i].done)); VKC(vkCreateFence(vk.dev, &fci, NULL, &vk.f[i].fence)); }
+  fprintf(stderr, "x400-display: vulkan up: swapchain %u images %ux%u format %d, present mode %s\n", vk.nimg, vk.ext.width, vk.ext.height, vk.fmt, mode == VK_PRESENT_MODE_MAILBOX_KHR ? "mailbox" : "fifo");
+  vk.up = 1;
+  return 0;
+}
+
+// imports a dma-buf (linear BGRA, one plane) as a VkImage; takes ownership of nothing: it dups fd
+static int vk_import(struct fdbuf *fb, int fd, const struct fd_msg *m)
+{
+  VkSubresourceLayout pl = { .offset = m->offset, .size = 0, .rowPitch = m->stride };
+  VkImageDrmFormatModifierExplicitCreateInfoEXT dmi = { VK_STRUCTURE_TYPE_IMAGE_DRM_FORMAT_MODIFIER_EXPLICIT_CREATE_INFO_EXT, NULL, 0 /* LINEAR */, 1, &pl };
+  VkExternalMemoryImageCreateInfo emi = { VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMAGE_CREATE_INFO, &dmi, .handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT };
+  VkImageCreateInfo ic = { VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, &emi, 0, VK_IMAGE_TYPE_2D, VK_FORMAT_B8G8R8A8_UNORM, { m->width, m->height, 1 }, 1, 1, VK_SAMPLE_COUNT_1_BIT,
+                           VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT, VK_IMAGE_USAGE_TRANSFER_SRC_BIT, VK_SHARING_MODE_EXCLUSIVE, 0, NULL, VK_IMAGE_LAYOUT_UNDEFINED };
+  VKC(vkCreateImage(vk.dev, &ic, NULL, &fb->img));
+  VkMemoryRequirements mr; vkGetImageMemoryRequirements(vk.dev, fb->img, &mr);
+  VkMemoryFdPropertiesKHR fdp = { VK_STRUCTURE_TYPE_MEMORY_FD_PROPERTIES_KHR };
+  VKC(vk.getFdProps(vk.dev, VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT, fd, &fdp));
+  uint32_t bits = mr.memoryTypeBits & fdp.memoryTypeBits, mt = 0; while (mt < 32 && !(bits & (1u << mt))) mt++;
+  if (mt == 32) { fprintf(stderr, "x400-display: vulkan: no memory type fits the dma-buf\n"); return -1; }
+  VkMemoryDedicatedAllocateInfo ded = { VK_STRUCTURE_TYPE_MEMORY_DEDICATED_ALLOCATE_INFO, NULL, fb->img, VK_NULL_HANDLE };
+  VkImportMemoryFdInfoKHR imp = { VK_STRUCTURE_TYPE_IMPORT_MEMORY_FD_INFO_KHR, &ded, VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT, dup(fd) };
+  VkMemoryAllocateInfo mai = { VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, &imp, mr.size, mt };
+  VKC(vkAllocateMemory(vk.dev, &mai, NULL, &fb->mem)); VKC(vkBindImageMemory(vk.dev, fb->img, fb->mem, 0));
+  return 0;
+}
+
+// Blits one frame into the swapchain and presents it. The image is in PREINITIALIZED the first time and TRANSFER_SRC after: one barrier handles both with UNDEFINED
+// (the contents are written by KWin's GPU work, not by us, and a linear image keeps them through a layout change).
+// Returns 0 shown, -1 failed (the caller drops to the CPU path for good).
+static int vk_show(struct fdbuf *fb, const struct fd_msg *m)
+{
+  uint64_t t0 = now_us();
+  uint32_t k = vk.cur; vk.cur = (vk.cur + 1) % VKP_FRAMES;
+  vkWaitForFences(vk.dev, 1, &vk.f[k].fence, VK_TRUE, UINT64_MAX); vkResetFences(vk.dev, 1, &vk.f[k].fence);
+  uint32_t idx; VkResult r = vkAcquireNextImageKHR(vk.dev, vk.sc, UINT64_MAX, vk.f[k].acq, VK_NULL_HANDLE, &idx);
+  uint64_t t1 = now_us();
+  if (r != VK_SUCCESS && r != VK_SUBOPTIMAL_KHR) { vk_log("vkAcquireNextImageKHR", r); return -1; }
+  vkResetCommandBuffer(vk.f[k].cb, 0);
+  VkCommandBufferBeginInfo bi = { VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO, .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT };
+  vkBeginCommandBuffer(vk.f[k].cb, &bi);
+  VkImageSubresourceRange rg = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+  VkImageMemoryBarrier bs = { VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER, .srcAccessMask = VK_ACCESS_MEMORY_WRITE_BIT, .dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT, .oldLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+                              .newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED, .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED, .image = fb->img, .subresourceRange = rg };
+  VkImageMemoryBarrier bd = { VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER, .dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT, .oldLayout = VK_IMAGE_LAYOUT_UNDEFINED, .newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                              .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED, .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED, .image = vk.imgs[idx], .subresourceRange = rg };
+  VkImageMemoryBarrier bb[2] = { bs, bd };
+  vkCmdPipelineBarrier(vk.f[k].cb, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, NULL, 0, NULL, 2, bb);
+  int32_t w = (int32_t)(vk.ext.width < m->width ? vk.ext.width : m->width), h = (int32_t)(vk.ext.height < m->height ? vk.ext.height : m->height);
+  VkImageBlit bl = { .srcSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 }, .srcOffsets = { { 0, 0, 0 }, { w, h, 1 } }, .dstSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 }, .dstOffsets = { { 0, 0, 0 }, { w, h, 1 } } };
+  vkCmdBlitImage(vk.f[k].cb, fb->img, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, vk.imgs[idx], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &bl, VK_FILTER_NEAREST);
+  VkImageMemoryBarrier bp = bd; bp.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT; bp.dstAccessMask = 0; bp.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL; bp.newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+  vkCmdPipelineBarrier(vk.f[k].cb, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, 0, 0, NULL, 0, NULL, 1, &bp);
+  vkEndCommandBuffer(vk.f[k].cb);
+  VkPipelineStageFlags ws = VK_PIPELINE_STAGE_TRANSFER_BIT;
+  VkSubmitInfo si = { VK_STRUCTURE_TYPE_SUBMIT_INFO, .waitSemaphoreCount = 1, .pWaitSemaphores = &vk.f[k].acq, .pWaitDstStageMask = &ws, .commandBufferCount = 1, .pCommandBuffers = &vk.f[k].cb,
+                      .signalSemaphoreCount = 1, .pSignalSemaphores = &vk.f[k].done };
+  r = vkQueueSubmit(vk.q, 1, &si, vk.f[k].fence);
+  if (r) { vk_log("vkQueueSubmit", r); return -1; }
+  VkPresentInfoKHR pi = { VK_STRUCTURE_TYPE_PRESENT_INFO_KHR, .waitSemaphoreCount = 1, .pWaitSemaphores = &vk.f[k].done, .swapchainCount = 1, .pSwapchains = &vk.sc, .pImageIndices = &idx };
+  r = vkQueuePresentKHR(vk.q, &pi);
+  uint64_t t2 = now_us();
+  if (r != VK_SUCCESS && r != VK_SUBOPTIMAL_KHR) { vk_log("vkQueuePresentKHR", r); return -1; }
+  vk.blits++; vk.acquire_sum_us += t1 - t0; if (t1 - t0 > vk.acquire_max_us) vk.acquire_max_us = t1 - t0; vk.submit_sum_us += t2 - t1;
+  return 0;
+}
 
 // 1: a frame was shown (or skipped), 0: nothing yet, -1: the socket is gone.
+static int path_chosen, geometry_set;
+static void cpu_geometry(ANativeWindow *win, int width, int height)
+{
+  if (geometry_set) return;
+  geometry_set = 1;
+  if (ANativeWindow_setBuffersGeometry(win, width, height, 5 /* BGRA_8888 */) < 0) fprintf(stderr, "x400-display: setBuffersGeometry failed\n");
+}
 static int sock_frame(int s, ANativeWindow *win, int width, int height, uint64_t *frames)
 {
   struct fd_msg m; struct iovec iov = { &m, sizeof m };
@@ -61,16 +209,28 @@ static int sock_frame(int s, ANativeWindow *win, int width, int height, uint64_t
   if (m.type == FDM_DROP) { fdbuf_drop(m.id); if (fd >= 0) close(fd); return 0; }
   if (m.type != FDM_FRAME) { if (fd >= 0) close(fd); return 0; }
   struct fdbuf *fb = NULL;
-  for (int i = 0; i < 32; i++) if (fdbufs[i].base && fdbufs[i].id == m.id) fb = &fdbufs[i];
+  for (int i = 0; i < 32; i++) if ((fdbufs[i].base || fdbufs[i].img) && fdbufs[i].id == m.id) fb = &fdbufs[i];
+  // the first frame fixes the path for this surface: a dma-buf goes by Vulkan if it comes up, anything else by the CPU
+  if (!vk.up && !vk.failed && !path_chosen) { path_chosen = 1; if ((m.flags & FDF_DMABUF) && !getenv("X400_NOVULKAN") && vk_init(win, width, height)) vk.failed = 1; }
   if (!fb && fd >= 0) {
-    size_t size = (size_t)m.mapoffset + m.maxsize;
-    uint8_t *base = mmap(NULL, size, PROT_READ, MAP_SHARED, fd, 0);
-    if (base != MAP_FAILED) for (int i = 0; i < 32; i++) if (!fdbufs[i].base) { fdbufs[i] = (struct fdbuf){ m.id, base, size }; fb = &fdbufs[i]; break; }
-    if (!fb && base != MAP_FAILED) munmap(base, size);
+    if ((m.flags & FDF_DMABUF) && vk.up) {
+      for (int i = 0; i < 32 && !fb; i++) if (!fdbufs[i].base && !fdbufs[i].img) { fdbufs[i].id = m.id; if (vk_import(&fdbufs[i], fd, &m)) { fdbuf_drop(m.id); vk.failed = 1; vk.up = 0; } else fb = &fdbufs[i]; }
+    } else if (!(m.flags & FDF_DMABUF)) {
+      size_t size = (size_t)m.mapoffset + m.maxsize;
+      uint8_t *base = mmap(NULL, size, PROT_READ, MAP_SHARED, fd, 0);
+      if (base != MAP_FAILED) for (int i = 0; i < 32; i++) if (!fdbufs[i].base && !fdbufs[i].img) { fdbufs[i] = (struct fdbuf){ .id = m.id, .base = base, .size = size }; fb = &fdbufs[i]; break; }
+      if (!fb && base != MAP_FAILED) munmap(base, size);
+    }
   }
   if (fd >= 0) close(fd);
   struct fd_reply r = { FDM_DONE, m.id };
-  if (fb && m.width == (uint32_t)width && m.height == (uint32_t)height) {
+  if (fb && fb->img && vk.up) {
+    if (m.width == (uint32_t)width && m.height == (uint32_t)height) {
+      if (vk_show(fb, &m)) { vk.up = 0; vk.failed = 1; fprintf(stderr, "x400-display: vulkan failed: this surface cannot be drawn with the CPU any more; the layer will be recreated at the next session\n"); }
+      else (*frames)++;
+    }
+  } else if (fb && fb->base && m.width == (uint32_t)width && m.height == (uint32_t)height && !vk.up) {
+    cpu_geometry(win, width, height);
     ANativeWindow_Buffer b;
     if (ANativeWindow_lock(win, &b, NULL) >= 0) {
       const uint8_t *src = fb->base + m.mapoffset + m.offset;
@@ -107,7 +267,8 @@ JNIEXPORT jint JNICALL Java_X400Display_nRun(JNIEnv *env, jclass type, jobject s
   const struct fb_header *h = (const struct fb_header *)map;
   ANativeWindow *win = ANativeWindow_fromSurface(env, surface);
   if (!win) return -1;
-  if (ANativeWindow_setBuffersGeometry(win, width, height, 5 /* BGRA_8888 */) < 0) fprintf(stderr, "x400-display: setBuffersGeometry failed\n");
+  // Not touched here: ANativeWindow_setBuffersGeometry would claim the surface for the CPU path, and a Vulkan swapchain could no longer be created on it.
+  // The CPU path sets it when it first draws.
   uint64_t shown = 0, frames = 0, last_frames = 0;
   struct timespec t0; clock_gettime(CLOCK_MONOTONIC, &t0);
   int sock = -1, tries = 0; int by_fd = getenv("X400_NOFD") == NULL;
@@ -124,6 +285,7 @@ JNIEXPORT jint JNICALL Java_X400Display_nRun(JNIEnv *env, jclass type, jobject s
     uint64_t seq = __atomic_load_n(&h->seq, __ATOMIC_ACQUIRE);
     if (seq == shown || h->magic != FB_MAGIC || h->width != (uint32_t)width || h->height != (uint32_t)height) { usleep(2000); continue; }
     ANativeWindow_Buffer b;
+    cpu_geometry(win, width, height);
     if (ANativeWindow_lock(win, &b, NULL) < 0) { usleep(5000); continue; }
     const uint8_t *src = map + FB_PIXELS;
     uint32_t rows = (uint32_t)height < (uint32_t)b.height ? (uint32_t)height : (uint32_t)b.height;
@@ -136,7 +298,9 @@ JNIEXPORT jint JNICALL Java_X400Display_nRun(JNIEnv *env, jclass type, jobject s
       last_frames = frames;
       struct timespec t1; clock_gettime(CLOCK_MONOTONIC, &t1);
       double dt = (t1.tv_sec - t0.tv_sec) + (t1.tv_nsec - t0.tv_nsec) * 1e-9;
-      fprintf(stderr, "x400-display: %llu frames shown, %.1f fps over the last %.1f s\n", (unsigned long long)frames, 300 / dt, dt);
+      fprintf(stderr, "x400-display: %llu frames shown, %.1f fps over the last %.1f s", (unsigned long long)frames, 300 / dt, dt);
+      if (vk.up && vk.blits) fprintf(stderr, " (vulkan: acquire mean %.2f ms max %.2f ms, record+submit+present mean %.2f ms)", vk.acquire_sum_us / 1000.0 / vk.blits, vk.acquire_max_us / 1000.0, vk.submit_sum_us / 1000.0 / vk.blits);
+      fputc('\n', stderr); vk.acquire_max_us = 0; vk.acquire_sum_us = 0; vk.submit_sum_us = 0; vk.blits = 0;
       t0 = t1;
     }
   }

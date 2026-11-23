@@ -1,21 +1,27 @@
 // linux-x400: asks KWin (zkde_screencast_unstable_v1) for a PipeWire stream of its first output and hands every frame to the
 // display helper that shows it on the tablet. Runs inside the chroot.
-// With the helper connected to FILE.sock, a frame is not copied: the PipeWire buffer (a memfd KWin allocated) is kept and its
-// descriptor is sent to the helper (SCM_RIGHTS), which reads the pixels from it and answers when done. Without the helper
-// the frame is copied into the frame file FILE (fb.h), as before. FILE's seq counts the frames in both modes.
-// Usage: capture FILE   (env WAYLAND_DISPLAY, XDG_RUNTIME_DIR; PipeWire must be running; X400_NOFD=1 never uses the socket)
+// With the helper connected to FILE.sock, a frame is not copied: the PipeWire buffer KWin allocated is kept and its descriptor is sent to the
+// helper (SCM_RIGHTS), which shows it and answers when done. Without the helper the frame is copied into the frame file FILE (fb.h), as before.
+// FILE's seq counts the frames in both modes.
+// The buffers are linear BGRA dma-bufs (KWin renders into them with the GPU: no read-back to the CPU) unless X400_FRAMES=copy, which asks for
+// ordinary shared memory; if KWin cannot give dma-bufs it falls back to shared memory by itself.
+// Usage: capture FILE   (env WAYLAND_DISPLAY, XDG_RUNTIME_DIR; PipeWire must be running; X400_NOFD=1 never uses the socket;
+//                        X400_RACECHECK=1 compares each dma-buf frame when it arrives with the same buffer 15 ms later, to see whether KWin's GPU
+//                        work was still running: a test mode that slows the stream down)
 #define _GNU_SOURCE
 #include "fb.h"
 #include "zkde-screencast-unstable-v1-client-protocol.h"
 #include "fdframe.h"
 #include <errno.h>
 #include <fcntl.h>
+#include <linux/dma-buf.h>
 #include <pipewire/pipewire.h>
 #include <spa/param/video/format-utils.h>
 #include <spa/param/props.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/ioctl.h>
 #include <sys/mman.h>
 #include <sys/socket.h>
 #include <sys/un.h>
@@ -33,20 +39,23 @@ static struct spa_video_info_raw vinfo;
 static uint8_t *map; static size_t map_size; static const char *path;
 static uint64_t seq, frames; static struct timespec t0;
 
-struct bufinfo { uint32_t id; int sent; };
+struct bufinfo { uint32_t id; int sent; uint8_t *cpumap; size_t cpusize; };
 static struct bufinfo *infos[32]; static uint32_t next_id = 1;
 static int lsock = -1, csock = -1;
 static struct spa_source *lsrc, *csrc;
 static struct pw_buffer *inflight, *pending;
-static uint64_t sent_frames, copied_frames;
+static uint64_t sent_frames, copied_frames, raced, race_checked;
+static int negotiated_dmabuf, racecheck;
 
 static void count_frame(void)
 {
   if (++frames % 120 == 0) {
     struct timespec t1; clock_gettime(CLOCK_MONOTONIC, &t1);
     double dt = (t1.tv_sec - t0.tv_sec) + (t1.tv_nsec - t0.tv_nsec) * 1e-9;
-    fprintf(stderr, "capture: %llu frames, %.1f fps over the last %.1f s (%llu by descriptor, %llu copied)\n", (unsigned long long)frames, 120 / dt, dt,
-            (unsigned long long)sent_frames, (unsigned long long)copied_frames);
+    fprintf(stderr, "capture: %llu frames, %.1f fps over the last %.1f s (%llu by descriptor, %llu copied; %s)", (unsigned long long)frames, 120 / dt, dt,
+            (unsigned long long)sent_frames, (unsigned long long)copied_frames, negotiated_dmabuf ? "dma-buf" : "shared memory");
+    if (racecheck) fprintf(stderr, "; race check: %llu of %llu frames still changing 15 ms after they arrived", (unsigned long long)raced, (unsigned long long)race_checked);
+    fputc('\n', stderr);
     t0 = t1;
   }
 }
@@ -60,13 +69,35 @@ static void drop_client(void)
   for (int i = 0; i < 32; i++) if (infos[i]) infos[i]->sent = 0;
 }
 
+static void dmabuf_sync(int fd, int start) { struct dma_buf_sync sy = { .flags = (start ? DMA_BUF_SYNC_START : DMA_BUF_SYNC_END) | DMA_BUF_SYNC_READ }; ioctl(fd, DMA_BUF_IOCTL_SYNC, &sy); }
+
+// a dma-buf buffer mapped for the CPU, kept for as long as the buffer lives (the fallback copy and the race check read it)
+static const uint8_t *dmabuf_map(struct pw_buffer *b)
+{
+  struct bufinfo *bi = b->user_data; struct spa_data *sd = &b->buffer->datas[0];
+  if (!bi) return NULL;
+  if (!bi->cpumap) {
+    void *m = mmap(NULL, sd->maxsize, PROT_READ, MAP_SHARED, (int)sd->fd, 0);
+    if (m == MAP_FAILED) { fprintf(stderr, "capture: cannot map a dma-buf: %s\n", strerror(errno)); return NULL; }
+    bi->cpumap = m; bi->cpusize = sd->maxsize;
+  }
+  return bi->cpumap + sd->mapoffset;
+}
+
+static uint64_t sample_hash(const uint8_t *p, uint32_t stride, uint32_t rows)
+{
+  uint64_t h = 1469598103934665603ull;
+  for (uint32_t y = 0; y < rows; y += 29) for (uint32_t x = 0; x + 4 <= stride; x += 92) { uint32_t v; memcpy(&v, p + (size_t)y * stride + x, 4); h = (h ^ v) * 1099511628211ull; }
+  return h;
+}
+
 static int send_frame(struct pw_buffer *b)
 {
   struct spa_data *sd = &b->buffer->datas[0]; struct bufinfo *bi = b->user_data;
   struct fb_header *h = (struct fb_header *)map;
   struct fd_msg m = { .type = FDM_FRAME, .id = bi->id, .has_fd = !bi->sent, .width = vinfo.size.width, .height = vinfo.size.height,
                       .stride = sd->chunk->stride ? (uint32_t)sd->chunk->stride : vinfo.size.width * 4, .offset = sd->chunk->offset,
-                      .mapoffset = sd->mapoffset, .maxsize = sd->maxsize, .seq = h ? h->seq : 0 };
+                      .mapoffset = sd->mapoffset, .maxsize = sd->maxsize, .flags = sd->type == SPA_DATA_DmaBuf ? FDF_DMABUF : 0, .seq = h ? h->seq : 0 };
   struct iovec iov = { &m, sizeof m };
   char cb[CMSG_SPACE(sizeof(int))] = {0};
   struct msghdr mh = { .msg_iov = &iov, .msg_iovlen = 1 };
@@ -118,6 +149,7 @@ static void on_remove_buffer(void *d, struct pw_buffer *b)
   struct bufinfo *bi = b->user_data; if (!bi) return;
   if (b == inflight) inflight = NULL;
   if (b == pending) pending = NULL;
+  if (bi->cpumap) munmap(bi->cpumap, bi->cpusize);
   if (csock >= 0 && bi->sent) {
     struct fd_msg m = { .type = FDM_DROP, .id = bi->id };
     if (send(csock, &m, sizeof m, MSG_NOSIGNAL) != (ssize_t)sizeof m) drop_client();
@@ -145,7 +177,11 @@ static void on_param(void *d, uint32_t id, const struct spa_pod *param)
   (void)d;
   if (!param || id != SPA_PARAM_Format) return;
   spa_format_video_raw_parse(param, &vinfo);
-  fprintf(stderr, "capture: format %u (BGRx=%u BGRA=%u) %ux%u\n", vinfo.format, SPA_VIDEO_FORMAT_BGRx, SPA_VIDEO_FORMAT_BGRA, vinfo.size.width, vinfo.size.height);
+  const struct spa_pod_prop *mp = spa_pod_find_prop(param, NULL, SPA_FORMAT_VIDEO_modifier);
+  fprintf(stderr, "capture: format %u (BGRx=%u BGRA=%u) %ux%u%s\n", vinfo.format, SPA_VIDEO_FORMAT_BGRx, SPA_VIDEO_FORMAT_BGRA, vinfo.size.width, vinfo.size.height, mp ? ", dma-buf" : ", shared memory");
+  // with a dma-buf KWin first sends the modifiers it can still pick from, then the one it chose: the buffers are asked for on the second
+  if (mp && (mp->flags & SPA_POD_PROP_FLAG_DONT_FIXATE) && SPA_POD_CHOICE_N_VALUES(&mp->value) > 1) return;
+  negotiated_dmabuf = mp != NULL;
   size_t need = FB_PIXELS + (size_t)vinfo.size.width * vinfo.size.height * 4;
   int fd = open(path, O_RDWR | O_CREAT, 0666);
   if (fd < 0 || ftruncate(fd, need)) { perror("capture: frame file"); pw_main_loop_quit(loop); return; }
@@ -156,7 +192,7 @@ static void on_param(void *d, uint32_t id, const struct spa_pod *param)
   uint8_t b[512]; struct spa_pod_builder pb = SPA_POD_BUILDER_INIT(b, sizeof b);
   const struct spa_pod *p = spa_pod_builder_add_object(&pb, SPA_TYPE_OBJECT_ParamBuffers, SPA_PARAM_Buffers,
     SPA_PARAM_BUFFERS_buffers, SPA_POD_CHOICE_RANGE_Int(4, 2, 8),
-    SPA_PARAM_BUFFERS_dataType, SPA_POD_CHOICE_FLAGS_Int((1 << SPA_DATA_MemPtr) | (1 << SPA_DATA_MemFd)));
+    SPA_PARAM_BUFFERS_dataType, SPA_POD_CHOICE_FLAGS_Int(mp ? (1 << SPA_DATA_DmaBuf) : ((1 << SPA_DATA_MemPtr) | (1 << SPA_DATA_MemFd))));
   pw_stream_update_params(stream, &p, 1);
 }
 
@@ -167,9 +203,20 @@ static void on_process(void *d)
   if (!b) return;
   while ((n = pw_stream_dequeue_buffer(stream))) { pw_stream_queue_buffer(stream, b); b = n; }
   struct spa_data *sd = &b->buffer->datas[0];
-  if (map && sd->data && sd->chunk->size && !(sd->chunk->flags & SPA_CHUNK_FLAG_CORRUPTED)) {
+  int dmabuf = sd->type == SPA_DATA_DmaBuf;
+  if (map && sd->chunk->size && !(sd->chunk->flags & SPA_CHUNK_FLAG_CORRUPTED) && (sd->data || dmabuf)) {
     struct fb_header *h = (struct fb_header *)map;
-    if (csock >= 0 && sd->type == SPA_DATA_MemFd && b->user_data) {
+    if (racecheck && dmabuf) {
+      const uint8_t *p = dmabuf_map(b);
+      if (p) {
+        uint32_t st = sd->chunk->stride ? (uint32_t)sd->chunk->stride : h->width * 4;
+        dmabuf_sync((int)sd->fd, 1); uint64_t h0 = sample_hash(p + sd->chunk->offset, st, h->height); dmabuf_sync((int)sd->fd, 0);
+        usleep(15000);
+        dmabuf_sync((int)sd->fd, 1); uint64_t h1 = sample_hash(p + sd->chunk->offset, st, h->height); dmabuf_sync((int)sd->fd, 0);
+        race_checked++; if (h0 != h1) raced++;
+      }
+    }
+    if (csock >= 0 && (sd->type == SPA_DATA_MemFd || dmabuf) && b->user_data) {
       if (!inflight) { if (send_frame(b) < 0) { pw_stream_queue_buffer(stream, b); drop_client(); return; } }
       else { if (pending) pw_stream_queue_buffer(stream, pending); pending = b; }
       __atomic_store_n(&h->seq, ++seq, __ATOMIC_RELEASE);
@@ -177,11 +224,16 @@ static void on_process(void *d)
       return;
     }
     uint32_t stride = sd->chunk->stride ? (uint32_t)sd->chunk->stride : h->width * 4;
-    const uint8_t *src = (const uint8_t *)sd->data + sd->chunk->offset;
-    for (uint32_t y = 0; y < h->height; y++) memcpy(map + FB_PIXELS + (size_t)y * h->stride, src + (size_t)y * stride, h->width * 4);
-    __atomic_store_n(&h->seq, ++seq, __ATOMIC_RELEASE);
-    copied_frames++;
-    count_frame();
+    const uint8_t *src = dmabuf ? dmabuf_map(b) : (const uint8_t *)sd->data;
+    if (src) {
+      src += sd->chunk->offset;
+      if (dmabuf) dmabuf_sync((int)sd->fd, 1);
+      for (uint32_t y = 0; y < h->height; y++) memcpy(map + FB_PIXELS + (size_t)y * h->stride, src + (size_t)y * stride, h->width * 4);
+      if (dmabuf) dmabuf_sync((int)sd->fd, 0);
+      __atomic_store_n(&h->seq, ++seq, __ATOMIC_RELEASE);
+      copied_frames++;
+      count_frame();
+    }
   }
   pw_stream_queue_buffer(stream, b);
 }
@@ -208,6 +260,7 @@ int main(int argc, char **argv)
   fprintf(stderr, "capture: KWin's stream is PipeWire node %u\n", node);
   pw_init(&argc, &argv);
   loop = pw_main_loop_new(NULL);
+  racecheck = getenv("X400_RACECHECK") != NULL;
   if (!getenv("X400_NOFD")) {
     struct sockaddr_un sa = { .sun_family = AF_UNIX };
     if (snprintf(sa.sun_path, sizeof sa.sun_path, "%s.sock", path) < (int)sizeof sa.sun_path) {
@@ -218,13 +271,29 @@ int main(int argc, char **argv)
     }
   }
   stream = pw_stream_new_simple(pw_main_loop_get_loop(loop), "x400-capture", pw_properties_new(PW_KEY_MEDIA_TYPE, "Video", PW_KEY_MEDIA_CATEGORY, "Capture", PW_KEY_MEDIA_ROLE, "Screen", NULL), &ev, NULL);
-  uint8_t b[1024]; struct spa_pod_builder pb = SPA_POD_BUILDER_INIT(b, sizeof b);
-  const struct spa_pod *p = spa_pod_builder_add_object(&pb, SPA_TYPE_OBJECT_Format, SPA_PARAM_EnumFormat,
+  uint8_t b[2048]; struct spa_pod_builder pb = SPA_POD_BUILDER_INIT(b, sizeof b);
+  const struct spa_pod *params[2]; int np = 0;
+  const char *fr = getenv("X400_FRAMES");
+  if (!fr || strcmp(fr, "copy")) {
+    // first choice: linear BGRA dma-bufs (the only modifier this driver has for BGRA; KWin renders into them with the GPU)
+    struct spa_pod_frame f[2];
+    spa_pod_builder_push_object(&pb, &f[0], SPA_TYPE_OBJECT_Format, SPA_PARAM_EnumFormat);
+    spa_pod_builder_add(&pb, SPA_FORMAT_mediaType, SPA_POD_Id(SPA_MEDIA_TYPE_video), SPA_FORMAT_mediaSubtype, SPA_POD_Id(SPA_MEDIA_SUBTYPE_raw),
+      SPA_FORMAT_VIDEO_format, SPA_POD_CHOICE_ENUM_Id(3, SPA_VIDEO_FORMAT_BGRA, SPA_VIDEO_FORMAT_BGRx, SPA_VIDEO_FORMAT_BGRA),
+      SPA_FORMAT_VIDEO_size, SPA_POD_CHOICE_RANGE_Rectangle(&SPA_RECTANGLE(2112, 1320), &SPA_RECTANGLE(1, 1), &SPA_RECTANGLE(8192, 8192)),
+      SPA_FORMAT_VIDEO_framerate, SPA_POD_CHOICE_RANGE_Fraction(&SPA_FRACTION(60, 1), &SPA_FRACTION(0, 1), &SPA_FRACTION(1000, 1)), 0);
+    spa_pod_builder_prop(&pb, SPA_FORMAT_VIDEO_modifier, SPA_POD_PROP_FLAG_MANDATORY | SPA_POD_PROP_FLAG_DONT_FIXATE);
+    spa_pod_builder_push_choice(&pb, &f[1], SPA_CHOICE_Enum, 0);
+    spa_pod_builder_long(&pb, 0 /* DRM_FORMAT_MOD_LINEAR */); spa_pod_builder_long(&pb, 0);
+    spa_pod_builder_pop(&pb, &f[1]);
+    params[np++] = spa_pod_builder_pop(&pb, &f[0]);
+  }
+  params[np++] = spa_pod_builder_add_object(&pb, SPA_TYPE_OBJECT_Format, SPA_PARAM_EnumFormat,
     SPA_FORMAT_mediaType, SPA_POD_Id(SPA_MEDIA_TYPE_video), SPA_FORMAT_mediaSubtype, SPA_POD_Id(SPA_MEDIA_SUBTYPE_raw),
     SPA_FORMAT_VIDEO_format, SPA_POD_CHOICE_ENUM_Id(3, SPA_VIDEO_FORMAT_BGRx, SPA_VIDEO_FORMAT_BGRx, SPA_VIDEO_FORMAT_BGRA),
     SPA_FORMAT_VIDEO_size, SPA_POD_CHOICE_RANGE_Rectangle(&SPA_RECTANGLE(2112, 1320), &SPA_RECTANGLE(1, 1), &SPA_RECTANGLE(8192, 8192)),
     SPA_FORMAT_VIDEO_framerate, SPA_POD_CHOICE_RANGE_Fraction(&SPA_FRACTION(60, 1), &SPA_FRACTION(0, 1), &SPA_FRACTION(1000, 1)));
-  if (pw_stream_connect(stream, PW_DIRECTION_INPUT, node, PW_STREAM_FLAG_AUTOCONNECT | PW_STREAM_FLAG_MAP_BUFFERS, &p, 1) < 0) { fprintf(stderr, "capture: pw_stream_connect failed\n"); return 1; }
+  if (pw_stream_connect(stream, PW_DIRECTION_INPUT, node, PW_STREAM_FLAG_AUTOCONNECT | PW_STREAM_FLAG_MAP_BUFFERS, params, np) < 0) { fprintf(stderr, "capture: pw_stream_connect failed\n"); return 1; }
   pw_main_loop_run(loop);
   pw_stream_destroy(stream); pw_main_loop_destroy(loop);
   return 0;
