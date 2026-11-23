@@ -1,0 +1,5 @@
+# G0: base tools every group may need; each group adds its own in x400/<group>/PACKAGES
+usbutils
+rfkill
+evtest
+iw

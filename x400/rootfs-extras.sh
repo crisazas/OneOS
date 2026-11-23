@@ -1,0 +1,25 @@
+#!/bin/sh
+# Adds the packages every hardware group asks for (x400/PACKAGES and x400/*/PACKAGES, one name per line, # comments) to the existing
+# out/rootfs-plasma tree and rebuilds out/rootfs-plasma.ext4 from it, without rebuilding the whole system (build-rootfs-plasma.sh does that).
+# Needs sudo and qemu-user-static. Usage: x400/rootfs-extras.sh [--no-image]
+set -eu
+cd "$(dirname "$0")/.."
+OUT=$PWD/out; R=$OUT/rootfs-plasma; IMG=$OUT/rootfs-plasma.ext4; SIZE=${SIZE:-6G}
+PKGS=$(cat x400/PACKAGES x400/*/PACKAGES 2>/dev/null | sed 's/#.*//' | tr -s ' \t\n' '\n' | grep -v '^$' | sort -u | tr '\n' ' ')
+[ -n "$PKGS" ] || { echo "no packages listed"; exit 1; }
+umnt() { for m in dev sys proc; do mountpoint -q "$R/$m" && { sudo mount --make-rslave "$R/$m"; sudo umount -R "$R/$m"; }; done; return 0; }
+trap umnt EXIT
+sudo cp /usr/bin/qemu-aarch64-static "$R/usr/bin/"; sudo cp /etc/resolv.conf "$R/etc/resolv.conf"
+for m in proc sys dev; do mountpoint -q "$R/$m" || sudo mount --rbind /$m "$R/$m"; done
+# nothing may start a daemon inside the chroot while installing (it shares the host's /proc, /sys and network)
+printf '#!/bin/sh\nexit 101\n' | sudo tee "$R/usr/sbin/policy-rc.d" >/dev/null; sudo chmod 755 "$R/usr/sbin/policy-rc.d"
+sudo chroot "$R" /usr/bin/env DEBIAN_FRONTEND=noninteractive sh -c "apt-get update -qq && apt-get install -y --no-install-recommends $PKGS && apt-get clean && rm -rf /var/lib/apt/lists/*"
+sudo rm -f "$R/usr/sbin/policy-rc.d"
+umnt
+sudo rm -f "$R/usr/bin/qemu-aarch64-static" "$R/etc/resolv.conf"
+echo "installed: $PKGS"
+[ "${1:-}" = --no-image ] && exit 0
+sudo rm -f "$IMG"; sudo truncate -s "$SIZE" "$IMG"
+sudo mkfs.ext4 -q -F -L linuxroot -d "$R" "$IMG"
+sudo chown "$(id -u):$(id -g)" "$IMG"
+ls -l "$IMG"
