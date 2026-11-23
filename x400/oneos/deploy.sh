@@ -42,6 +42,7 @@ if [ "$1" != --scripts-only ]; then
     echo "system.raw verified ($got)"
 fi
 INC=/data/local/tmp/x400_incoming
+KEYS=""; [ -f "$ROOT/out/input/keys" ] && KEYS=keys
 adb_ shell "mkdir -p $INC"
 adb_ push "$ROOT/x400/oneos/guest_prepare.sh" "$ROOT/x400/oneos/guest_start.sh" "$INC/" >/dev/null
 adb_ push "$ROOT/out/display/x400-display.dex" "$ROOT/out/display/libx400display.so" "$ROOT/x400/display/display.sh" \
@@ -58,7 +59,7 @@ if [ -f "$ROOT/out/mesa-guest/libvulkan_virtio.so" ]; then
     su_ "mkdir -p $STAGE/x400 && cp -f $INC/libvulkan_virtio.so $STAGE/x400/libvulkan_virtio.so && chmod 644 $STAGE/x400/libvulkan_virtio.so && chcon u:object_r:apex_data_file:s0 $STAGE/x400/libvulkan_virtio.so"
 fi
 su_ "cp -f $INC/guest_prepare.sh $INC/guest_start.sh $STAGE/ && chmod 755 $STAGE/guest_prepare.sh $STAGE/guest_start.sh && \
-     mkdir -p $STAGE/x400 && cd $INC && cp -f x400-display.dex libx400display.so display.sh capture inputd $([ -f keys ] && echo keys) session-inner.sh cpu-sample.sh x400vt $STAGE/x400/ && \
+     mkdir -p $STAGE/x400 && cd $INC && cp -f x400-display.dex libx400display.so display.sh capture inputd $KEYS session-inner.sh cpu-sample.sh x400vt $STAGE/x400/ && \
      chmod 755 $STAGE/x400/* && chown -R 0:0 $STAGE/x400 $STAGE/guest_prepare.sh $STAGE/guest_start.sh && rm -rf $INC"
 # what each hardware group ships (x400/HARDWARE.md): x400/<group>/stage/ goes to $STAGE/x400/groups/<group>/ as it is
 for gd in "$ROOT"/x400/*/stage; do
