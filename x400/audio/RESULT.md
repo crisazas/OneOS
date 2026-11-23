@@ -286,38 +286,72 @@ the list (not played with).
 unmounted; the live PipeWire/WirePlumber (16707/16957) never touched; test PipeWire, WirePlumber, bridge and `audiod`
 processes stopped and their files in the guest's /tmp removed.
 
-## Phase 4 (IV-sense confirmation): NOT DONE, the tablet rebooted and root is gone
+## Phase 4 (IV-sense confirmation): not done, and now forbidden
 
-Stopped by the rule in CTX.md ("a reboot loses root: say so in RESULT and stop"). Nothing of the final round was measured.
+The tablet rebooted at 06:22:59 while I opened `pcmC0D118c` for capture with a playback stream running and the HAL holding it: kernel oops in
+`abox_wdma_mute_stream+0x38` (owner's finding, `/tmp/opencode/lk2/dumpstate_lastkmsg.lst`). **Rule: never open `pcmC0D118c`, `pcmC0D16c`,
+`pcmC0D21c` (or any capture PCM the HAL holds), and no `x400-snd cap` on any PCM while a stream plays.** Everything below goes through
+`audioserver` (AAudio) and the mixer controls (`controlC0`) only. `x400-snd cap` stays in the tree only for idle PCMs.
 
-What happened: the first IV-sense attempt, with the tone at 10 % through `audioserver`, ran `x400-snd cap` on
-`pcmC0D16c` (rc=124, no data, the HAL owns the PCMs) and `pcmC0D21c` (`prepare: Invalid argument`).
-The second attempt (tone 10 %, then `x400-snd cap 0 118 ...`, the SPKAMP reference PCM that `audioserver`'s HAL keeps
-open) lost adb in the middle of the command. When adb came back (after `adb kill-server`):
-`/proc/uptime` = 43 s, `su: inaccessible or not found` (uid 2000 shell), `kwin_wayland` not running, One UI's
-`zygote`/`zygote_next` running, `init.svc.audioserver=running` (init's own). So: **reboot, root (DFroot) lost, the
-Linux session is gone.** I do not know the cause. It coincides with opening a capture PCM that the audio HAL had
-open while a stream played; I cannot rule that out as the trigger, and G5's camera work was running on the same device,
-so I cannot say it was mine either. Do not repeat `cap` on `pcmC0D118c`/`D16c` while a stream plays until the cause is known.
 
-State now (read as shell, no root): `guest_audio.flag` absent, `audioserver` running (init's), the amplifier controls are
-the boot defaults (volume 0, switch Disable: `aw_dev_*_volume` was never written by me in this round), the accelerometer
-untouched. Nothing of mine is running. `x400/audio/` is committed and clean; no code was changed in this round.
+## Phase 5 (after the reboot, root back): the tone IS heard by the tablet's own microphone
 
-### Plan for when root is back (not run)
-1. IV-sense: the HAL already opens `pcmC0D118c` (SPKAMP reference, `ABOX SPKAMP_A/B` -> WDMA9/WDMA4) and feeds the Awinic
-   algorithm with it, so a second reader may be refused or may disturb it. Safer than a second open: take the same signal
-   from the firmware log (`abox/runtime/log`, `awinic_get_big_data`, already read in phase 3: identical for 0 % and 15 %, but
-   always with `aw_dev_*_volume` = 0) and repeat it **with** `aw_dev_0_volume`/`aw_dev_1_volume` = 500 and the switches
-   Enable, before looking for a new capture path. If `max_excursion` then follows the tone amplitude, that is the physical proof.
-2. The HAL's own volume: `grep -n aw_dev /vendor/etc/mixer_paths.xml /vendor/etc/mixer_gains.xml` found only `aw_dev_N_prof`,
-   `aw_dev_N_switch`, `aw_dev_N_hmute`; **no** `aw_dev_N_volume` anywhere in the XML and `gain-media-speaker` is empty. So the
-   HAL does not set it in this configuration, and the value read during playback (0) is the one the HAL leaves.
-   Whether 0 means "no attenuation" (the Awinic convention: volume register = attenuation steps) or "mute" is the open question;
-   the owner's registers observation (reg 0x01 changes at volume 600) suggests the chip reacts to it, not that 0 is silent.
-3. Only after 1 and 2 show an effect, put `aw_dev_N_switch Enable` and `aw_dev_N_volume <value>` in `x400-audiod` (set when the
-   output stream opens, back to the default when it closes) and in `stage/host.sh`, then test through the bridge.
-   I did not write that code now: it would be untested and could change a speaker's gain with nobody to listen.
+State when measured: uptime 25 min after the reboot, One UI's framework up (`system_server`, `zygote`, `surfaceflinger` running), `audioserver`
+is init's own, STREAM_MUSIC index 1 of 0..15, `guest_audio.flag` absent, amp `aw_dev_*_volume` 0, `aw_dev_*_switch` Disable (the HAL turns the
+switches on while a stream is open and off after). No kwin/Linux session was running. All tones <= 12 %; all through AAudio.
 
-### Verdict (unchanged): sound **not confirmed**.
-No measurement of this round exists; phase 3's verdict stands.
+### Method
+`x400-aaudio` plays 1 kHz with a **gate** (3 s tone / 3 s silence, `X400_GATE=1`) while it records with AAudio input in the same process, so each recording
+holds its own negative control. `measure-gated.py` takes the Goertzel magnitude at the tone frequency in each 3 s block. `x400-aaudio selftest [hz] [amp%]`
+does 18 s of that and prints `TONE HEARD` / `TONE NOT HEARD` from the recording alone (top third / bottom third of the per-second magnitudes >= 8).
+
+### Evidence (amp volume 0 unless noted; "tone/sil" = mean magnitude in tone blocks / silent blocks at 1 kHz)
+| condition | result |
+|---|---|
+| tone 12 %, 1 kHz, gated, 4 runs | tone/sil = 45.9, 41.5, 48.3, 36.2, 60.4 (tone blocks 5.3e-4 .. 8.6e-4, silent blocks 5e-6 .. 4e-5) |
+| tone 6 % | 2.5e-4 in tone blocks, 27.9x silent (12 % gave ~6e-4: ~2.4x for 2x amplitude, roughly linear) |
+| **negative: recording only, nothing played** (18 s) | tone/sil = 1.04 |
+| **negative: 1500 Hz tone, measured at 1000 Hz** | tone/sil = 1.65 (it appears at 1500 Hz: 73.7, and not at 1000) |
+| **negative: Android music stream volume 0, selftest** | ratio 3.2, `TONE NOT HEARD` |
+| stream volume back at 1, selftest | ratio 20.4-22.5, `TONE HEARD` |
+
+The magnitude follows the played frequency, the played amplitude, the gate and Android's stream volume, and is absent with nothing played.
+That is the speaker side acting on the microphone; confirmed by the tablet's own microphone through AudioRecord/AAudio.
+**What this cannot exclude:** a purely digital leak inside the SoC (A-Box feeding the microphone chain). I have no evidence of such a route
+(the DMIC path uses `UAIF6 -> WDMA1`, the speaker path `RDMA -> SIFS -> UAIF1`; no control connects them), and the dependency below argues against it,
+but I cannot see inside A-Box. The PC microphone did not hear it (distance unknown), so there is no independent acoustic proof from outside.
+
+### The amplifier "volume" is an attenuation, not the missing gain
+Tone magnitude at 1 kHz (tone/sil) against `aw_dev_0/1_volume` (both set, switches Enable, 12 %, 12 s runs):
+0 -> 51, 40 -> 23, 120 -> 7.5, 250 -> 2.5, 409 -> 1.2, 500 -> 1.3, 1.7, 1.3, 2.3 (3 repetitions interleaved with 0: 48, 36, 60 at 0). **Monotonic fall: the higher the value,
+the quieter, and from about 250 on the tone is gone.** So 0 is *no attenuation* (loudest), and the `aw_dev_N_volume` of the amp must stay at
+0. The owner's idea (40 % of the range, 409) would mute the speaker; I did **not** put it into `x400-audiod`/`host.sh`, and nothing there touches
+`aw_dev_*_volume`. The monotonic dependence is itself evidence that the signal passes through the amplifier's gain stage before it reaches the
+microphone. The switches are the HAL's job (it applies `dev-dual-speaker`: `aw_dev_N_switch Enable` when a stream opens and `Disable` at the end; seen in logcat:
+`audio_route: ctl : "aw_dev_1_switch" value "Enable"` ... `"Disable"`), so nothing to add there either.
+
+### Why phase 3 saw nothing and this does
+Phase 3 (no sound at 5-50 %, same code) ran with One UI's framework stopped and `audioserver` started by me: the policy dump showed
+`invalid volume index range in the curve` for every stream and the track had `G db -inf`. Now the framework is up, STREAM_MUSIC has a volume
+(index 1/15, `PortVol dB -54`), and the same program is heard. I did not isolate which of the differences matters (the volume curves, the
+index, the reboot's clean state). **This matters for the integrator:** in the OneOS session the framework is stopped again. The bridge may meet
+the phase 3 condition there. Check with `x400-aaudio selftest 1000 10` inside the session before trusting the speaker; if it prints `TONE NOT HEARD`,
+the cure to try is AudioFlinger's stream volume (`cmd media_session volume --stream 3 --set N` needs the framework; without it nothing sets it).
+Not tested in a session.
+
+### The bridge, through the same measure
+`x400-feed <socket> 12 1000 10` (in `stage/`, a gated test tone, real time) into `x400-audiod`'s `x400-audio-out.sock`, `x400-aaudio rec` listening:
+per-second magnitudes `3.8e-4 4.8e-4 5.8e-5 1.3e-5 8.2e-6 4.3e-4 4.7e-4 4.8e-4 5.8e-5 1.4e-5 3.5e-5 1.9e-5`: top third / bottom third = 34.1.
+audiod's log shows the bytes (2304000 in 12 s) and the stream closing with the client. So guest-side audio (here a Unix-socket client standing in for
+`x400-pwbridge`, which was already shown to deliver the same bytes in phase 3) comes out of the speaker and is heard.
+One bug found and fixed on the way: `x400-audiod` used `X400_MAXAMP` as a *scale* (10 % input -> 1.5 % at a 15 % ceiling, inaudible); it now *clips* at the
+ceiling, as its header says. Default 100 %: no change.
+
+### Verdict: **sound CONFIRMED by the tablet's own microphone (AAudio), with negative controls; not confirmed by any outside microphone.**
+The software chain works end to end: guest socket -> `x400-audiod` -> AAudio -> AudioFlinger -> HAL -> amplifier -> speaker -> microphone -> AAudio.
+Open: (a) behaviour inside the OneOS session with the framework stopped (see above); (b) a person listening would close the "internal leak" doubt.
+
+### Left as found
+Amp volumes 0, switches Disable (HAL-controlled), STREAM_MUSIC back at index 1 (I set it to 0 for the negative control and back), `audioserver`
+init's, no `x400-audiod`/`x400-aaudio` running, `guest_audio.flag` absent, debugfs not mounted, temporary recordings removed.
+The `stage/` has `x400-aaudio` (for `selftest`) and `x400-feed` as well as the earlier files.

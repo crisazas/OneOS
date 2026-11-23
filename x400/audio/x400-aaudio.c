@@ -4,6 +4,8 @@
  *   x400-aaudio tone <hz> <secs> <amp%>            play a sine on the speaker
  *   x400-aaudio rec  <secs> <out.raw> [src]        record s16le 48000 mono/stereo, print RMS/peak per 0.25 s
  *   x400-aaudio both <hz> <secs> <amp%> <out.raw>  record while a tone plays (acoustic loop: speaker -> mic)
+ *   x400-aaudio selftest [hz] [amp%]               18 s: 3 s tone / 3 s silence on the speaker while the microphone records;
+ *                                                  prints the tone magnitude per second and "TONE HEARD" / "TONE NOT HEARD"
  *
  * Build: x400/audio/build-android.sh
  */
@@ -62,6 +64,10 @@ static void *play_thread(void *p)
 	while (done < total && !stop_flag) {
 		for (int i = 0; i < 480; i++, ph += st) {
 			double fade = done + i < RATE / 20 ? (double)(done + i) / (RATE / 20) : 1.0;
+			if (getenv("X400_GATE")) {
+				/* 3 s tone / 3 s silence, so one recording holds its own negative control */
+				if (((done + i) / (3 * RATE)) % 2) fade = 0;
+			}
 			if (getenv("X400_PULSE")) {
 				/* on/off at X400_PULSE Hz (square), to put speaker motion inside the accelerometer's band */
 				double ph2 = fmod((double)(done + i) * atof(getenv("X400_PULSE")) / RATE, 1.0);
@@ -112,8 +118,60 @@ static int record(double secs, const char *out, int preset)
 	return 0;
 }
 
+/* Goertzel magnitude of s[0..n) at hz */
+static double goertzel(const int16_t *s, long n, double hz)
+{
+	double w = 2 * M_PI * hz / RATE, c = 2 * cos(w), s1 = 0, s2 = 0;
+	for (long i = 0; i < n; i++) {
+		double v = s[i] / 32768.0, s0 = v + c * s1 - s2;
+		s2 = s1;
+		s1 = s0;
+	}
+	return sqrt(fmax(s1 * s1 + s2 * s2 - c * s1 * s2, 0)) * 2 / n;
+}
+
+static int cmp_d(const void *a, const void *b) { double x = *(const double *)a, y = *(const double *)b; return (x > y) - (x < y); }
+
+/* Plays the gated tone and records at the same time, then decides from the recording alone: the magnitude at the tone
+ * frequency, one value per second, must be bimodal (3 s high / 3 s low) with the top third >= 8x the bottom third. */
+static int selftest(double hz, double amp)
+{
+	const char *path = "/data/local/tmp/x400-selftest.raw";
+	setenv("X400_GATE", "1", 1);
+	struct play_args a = { hz, 18, amp };
+	pthread_t t;
+	pthread_create(&t, NULL, play_thread, &a);
+	int rc = record(18, path, AAUDIO_INPUT_PRESET_VOICE_RECOGNITION);
+	stop_flag = 1;
+	pthread_join(t, NULL);
+	if (rc) return rc;
+	FILE *f = fopen(path, "rb");
+	static int16_t buf[RATE * 20];
+	long n = f ? fread(buf, 2, RATE * 20, f) : 0;
+	if (f) fclose(f);
+	remove(path);
+	int secs = n / RATE;
+	if (secs < 9) { printf("selftest: only %d s recorded\n", secs); return 4; }
+	double m[20], srt[20];
+	for (int i = 0; i < secs; i++) {
+		m[i] = goertzel(buf + (long)i * RATE, RATE, hz);
+		srt[i] = m[i];
+		printf("sec %2d tone magnitude %.7f\n", i, m[i]);
+	}
+	qsort(srt, secs, sizeof *srt, cmp_d);
+	int k = secs / 3;
+	double lo = 0, hi = 0;
+	for (int i = 0; i < k; i++) { lo += srt[i]; hi += srt[secs - 1 - i]; }
+	double ratio = hi / (lo + 1e-12);
+	printf("selftest: top third / bottom third = %.1f (>= 8 means heard; no-tone controls gave 1-3)\n", ratio);
+	printf("selftest: %s (%.0f Hz, %.0f %%)\n", ratio >= 8 ? "TONE HEARD" : "TONE NOT HEARD", hz, amp * 100);
+	return ratio >= 8 ? 0 : 1;
+}
+
 int main(int argc, char **argv)
 {
+	if (argc >= 2 && !strcmp(argv[1], "selftest"))
+		return selftest(argc > 2 ? atof(argv[2]) : 1000, (argc > 3 ? atof(argv[3]) : 10) / 100.0);
 	if (argc >= 5 && !strcmp(argv[1], "tone")) {
 		struct play_args a = { atof(argv[2]), atof(argv[3]), atof(argv[4]) / 100.0 };
 		play_thread(&a);

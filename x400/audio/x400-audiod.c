@@ -9,7 +9,7 @@
  * One client per socket. The AAudio stream is opened when a client connects and closed when it goes away,
  * so the speaker amplifier / microphone are not kept powered while nobody uses them.
  * Every second per connection it logs bytes, frames and RMS/peak (the Android-side evidence).
- * A hard output ceiling (X400_MAXAMP, default 100 %) scales the samples; set it low for tests.
+ * X400_MAXAMP (percent of full scale, default 100) is a hard ceiling: samples are clipped to it, never scaled.
  */
 #include <aaudio/AAudio.h>
 #include <errno.h>
@@ -136,7 +136,8 @@ static void serve_out(int c)
 		if (n <= 0) break;
 		have += n;
 		if (have < sizeof buf) continue;
-		for (int i = 0; i < FRAMES * 2; i++) buf[i] = (int16_t)(buf[i] * max_amp);
+		int lim = (int)(max_amp * 32767);
+		for (int i = 0; i < FRAMES * 2; i++) buf[i] = buf[i] > lim ? lim : buf[i] < -lim ? -lim : buf[i];
 		meter_add(&m, buf, FRAMES * 2);
 		aaudio_result_t r = AAudioStream_write(s, buf, FRAMES, 1000000000LL);
 		if (r < 0) { dlog("out: write: %s", AAudio_convertResultToText(r)); break; }
