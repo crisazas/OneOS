@@ -12,7 +12,7 @@ The desktop is drawn by the tablet's GPU, not by llvmpipe. Measured on the table
   (`OpenGL core 3.1`, renderer `zink Vulkan 1.3 (Virtio-GPU Venus (Mali-G68))`). Mesa 26's Zink needs `nullDescriptor`, which Samsung's Vulkan does not offer, hence 25.0.7.
 - **No CPU copy of the frame:** `capture` asks KWin for linear BGRA dma-bufs; the display helper imports each one as a `VkImage` and blits it into the layer's swapchain
   (Vulkan, present mode mailbox). With one `es2gears` on Zink as the load, KWin used ~263 ticks per 5 s with that stream against ~410 with shared memory, and the helper's `acquire` took 0.14 ms (mean).
-- **90 Hz mode:** KWin's virtual output has one 60 Hz mode; `session-inner.sh` adds a 90 Hz one with `kscreen-doctor` and makes it current (`X400_HZ=60` keeps 60).
+- **120 Hz mode:** KWin's virtual output has one 60 Hz mode; `session-inner.sh` adds a 120 Hz one with `kscreen-doctor` and makes it current (`X400_HZ=60` keeps 60). It is above the panel's 90 Hz on purpose: it gave the most frames (see the comment in the script).
 - **Frame rate:** the frames that reach the layer went from ~7 fps (shared memory, `capture` copying into a file) to ~41 fps at 60 Hz and ~51 fps at 90 Hz with one `es2gears` on Zink.
   **90 fps is not reached**: with that client KWin hands about 51-62 frames/s to the screencast and `kwin_wayland` is at ~58 % of a core, so the limit is not the CPU. Why is not known yet.
 - **Not measured:** a long session (hours), heat, battery, more than two simultaneous GPU clients, and the picture with anything other than `es2gears` and the desktop itself.

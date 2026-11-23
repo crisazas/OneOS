@@ -65,8 +65,10 @@ export QT_LOGGING_RULES="kwin_screencast.debug=true;kwin_core.debug=true;kwin_sc
 eval $KWIN --virtual --no-lockscreen --width 2112 --height 1320 --socket wayland-x400 > /tmp/kwin.log 2>&1 &
 sleep 6
 export WAYLAND_DISPLAY=wayland-x400 QT_QPA_PLATFORM=wayland
-# KWin's virtual output has one mode, 60 Hz; the panel does 90. Add a 90 Hz mode and make it the current one before Plasma and the capture start (X400_HZ=60 keeps 60)
-HZ=${X400_HZ:-90}
+# KWin's virtual output has one mode, 60 Hz. Add a 120 Hz mode and make it the current one before Plasma and the capture start (X400_HZ=60 keeps 60).
+# 120 although the panel does 90: the helper presents with mailbox, so it never waits for the panel, and a faster virtual output gives KWin a shorter frame interval.
+# Measured on the SM-X400 with one wl-client: frames shown 52 fps at 90 Hz, 55 at 100, 64 at 120.
+HZ=${X400_HZ:-120}
 if [ "$HZ" != 60 ] && command -v kscreen-doctor >/dev/null; then
   n=0; while [ $n -lt 10 ]; do
     kscreen-doctor -o 2>/dev/null | grep -a -q "2112x1320@$HZ" || kscreen-doctor output.1.addCustomMode.2112.1320.${HZ}000.full > /dev/null 2>&1
