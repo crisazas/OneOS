@@ -37,12 +37,24 @@ mkdir -p "$ROOTFS" "$STAGE/data"
 # files, and is not used then; x400/oneos/persist-reset.sh starts a new one.
 PERSIST="$STAGE/persist.img"; LOWER="$STAGE/lower"; PMNT="$STAGE/persist"
 PERSIST_SIZE=${X400_PERSIST_SIZE:-8G}
+# A free loop device, with its node: above max_loop (48 here) the kernel makes the device when `losetup -f` asks, and ueventd makes /dev/block/loopN a moment
+# later (or, just after a boot, not at all in time): busybox then reports the *file* as "No such file or directory". Wait for the node, then make it from sysfs.
+free_loop() {
+    local l n i d
+    l=$($BB losetup -f) || return 1
+    n=${l##*loop}
+    for i in 1 2 3 4 5 6 7 8 9 10; do [ -b "$l" ] && { echo "$l"; return 0; }; sleep 0.2; done
+    d=$(cat "/sys/block/loop$n/dev" 2>/dev/null); [ -n "$d" ] || d="7:$((n * 8))"
+    $BB mknod "$l" b "${d%%:*}" "${d##*:}" 2>/dev/null
+    [ -b "$l" ] && { echo "free_loop: made the node $l ($d) by hand" >&2; echo "$l"; return 0; }
+    return 1
+}
 persist_off() { echo "WARNING: persistent layer off ($1): the root is read-only and nothing is kept"; PERSIST_ON=0; }
 attach_image() { # attaches system.raw read-only on a loop and mounts it on $1; leaves the loop in $LOOP
     for l in $($BB losetup -a | grep "system.raw" | cut -d: -f1); do
         $BB losetup -d "$l" 2>/dev/null || true
     done
-    LOOP=$($BB losetup -f)
+    LOOP=$(free_loop) || { echo "ERROR: no free loop device"; exit 3; }
     $BB losetup -r "$LOOP" "$STAGE/system.raw" || { echo "ERROR: could not attach system.raw read-only ($LOOP)"; exit 3; }
     loop_ro "$LOOP" || echo "WARNING: could not confirm that $LOOP is read-only (sysfs)"
     echo "Using LOOP: $LOOP (read-only)"
@@ -69,8 +81,15 @@ else
         [ $rc -le 1 ] || persist_off "e2fsck of $PERSIST returned $rc (see $STAGE/persist.fsck.log)"
     fi
     if [ $PERSIST_ON = 1 ]; then
-        PL=$($BB losetup -f)
-        $BB losetup "$PL" "$PERSIST" && $BB mount -t ext4 -o noatime "$PL" "$PMNT" || { [ -n "$PL" ] && $BB losetup -d "$PL" 2>/dev/null; persist_off "could not mount $PERSIST"; }
+        # The layer is what the user's work lives in: if it cannot be mounted the session does not start (a read-only root would run the desktop as root,
+        # with nothing kept, and nobody would notice). X400_PERSIST=0 is the way to ask for that.
+        ok=0
+        for try in 1 2 3; do
+            PL=$(free_loop) && $BB losetup "$PL" "$PERSIST" && $BB mount -t ext4 -o noatime "$PL" "$PMNT" && { ok=1; break; }
+            [ -n "$PL" ] && $BB losetup -d "$PL" 2>/dev/null
+            echo "persistent layer: attempt $try failed ($PL)"; sleep 1
+        done
+        [ $ok = 1 ] || { echo "ERROR: could not mount $PERSIST (3 attempts): not starting a session with no persistence; X400_PERSIST=0 asks for a read-only root"; exit 3; }
     fi
     if [ $PERSIST_ON = 1 ]; then
         mkdir -p "$PMNT/up" "$PMNT/work"
