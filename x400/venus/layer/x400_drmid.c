@@ -215,6 +215,36 @@ static VKAPI_ATTR int32_t w_arg_vkCreateGraphicsPipelines(VkDevice d, VkPipeline
 {
    if (trace_on && __atomic_add_fetch(&arg_prints_pipe, 1, __ATOMIC_RELAXED) <= 10)
       for (uint32_t i = 0; i < n; i++) dump_gpi(&g[i]);
+   /* X400_DYN_OFF=id,id,...  removes those VkDynamicState values from every graphics pipeline before it reaches the driver, so the pipeline's own
+    * (already filled in) static state is used instead. X400_PIPE_OFF=bias clears depthBiasEnable. A bisection tool on the real program: Zink's
+    * later vkCmdSet* calls for a state that is no longer dynamic are not valid Vulkan, but they are passed through and ignored. */
+   enum { MAXP = 8 };
+   VkGraphicsPipelineCreateInfo gcopy[MAXP]; VkPipelineDynamicStateCreateInfo dcopy[MAXP]; VkDynamicState dlist[MAXP][80];
+   VkPipelineViewportStateCreateInfo vcopy[MAXP]; VkPipelineRasterizationStateCreateInfo rcopy[MAXP];
+   VkViewport svp = { 0, 0, 256, 256, 0, 1 }; VkRect2D ssc = { { 0, 0 }, { 256, 256 } };
+   const char *off = getenv("X400_DYN_OFF"), *poff = getenv("X400_PIPE_OFF");
+   if (((off && *off) || (poff && *poff)) && n <= MAXP) {
+      if (getenv("X400_VP_SIZE")) { svp.width = svp.height = (float)atoi(getenv("X400_VP_SIZE")); ssc.extent.width = ssc.extent.height = (uint32_t)atoi(getenv("X400_VP_SIZE")); }
+      for (uint32_t i = 0; i < n; i++) {
+         gcopy[i] = g[i];
+         if (g[i].pDynamicState && off && *off) {
+            unsigned kept = 0; int drop_vp = 0;
+            for (uint32_t k = 0; k < g[i].pDynamicState->dynamicStateCount && kept < 80; k++) {
+               int v = (int)g[i].pDynamicState->pDynamicStates[k], hit = 0;
+               char tmp[512]; strncpy(tmp, off, sizeof tmp - 1); tmp[sizeof tmp - 1] = 0;
+               for (char *t = strtok(tmp, ","); t; t = strtok(NULL, ",")) if (atoi(t) == v) hit = 1;
+               if (hit) { if (v == 1000267003 || v == 1000267004) drop_vp = 1; continue; }
+               dlist[i][kept++] = (VkDynamicState)v;
+            }
+            dcopy[i] = *g[i].pDynamicState; dcopy[i].dynamicStateCount = kept; dcopy[i].pDynamicStates = dlist[i];
+            gcopy[i].pDynamicState = &dcopy[i];
+            if (drop_vp && g[i].pViewportState) { vcopy[i] = *g[i].pViewportState; vcopy[i].viewportCount = vcopy[i].scissorCount = 1; vcopy[i].pViewports = &svp; vcopy[i].pScissors = &ssc; gcopy[i].pViewportState = &vcopy[i]; }
+         }
+         if (poff && strstr(poff, "bias") && g[i].pRasterizationState) { rcopy[i] = *g[i].pRasterizationState; rcopy[i].depthBiasEnable = VK_FALSE; gcopy[i].pRasterizationState = &rcopy[i]; }
+      }
+      g = gcopy;
+      if (trace_on) fprintf(stderr, "x400-vk: pipelines created with X400_DYN_OFF=%s X400_PIPE_OFF=%s\n", off ? off : "", poff ? poff : "");
+   }
    int32_t r = ((int32_t (*)(VkDevice, VkPipelineCache, uint32_t, const VkGraphicsPipelineCreateInfo *, const VkAllocationCallbacks *, VkPipeline *))info_vkCreateGraphicsPipelines.real)(d, c, n, g, a, out);
    __atomic_add_fetch(&info_vkCreateGraphicsPipelines.calls, 1, __ATOMIC_RELAXED);
    if (r) note_fail("vkCreateGraphicsPipelines", r, __atomic_add_fetch(&info_vkCreateGraphicsPipelines.fails, 1, __ATOMIC_RELAXED));
@@ -231,7 +261,9 @@ STATE1(vkCmdSetRasterizerDiscardEnable, VkBool32)
 STATE1(vkCmdSetCullMode, uint32_t)
 STATE1(vkCmdSetFrontFace, uint32_t)
 STATE1(vkCmdSetPrimitiveTopology, uint32_t)
-STATE1(vkCmdSetDepthTestEnable, VkBool32)
+STATE1(vkCmdSetDepthWriteEnable, VkBool32)
+STATE1(vkCmdSetDepthBoundsTestEnable, VkBool32)
+STATE1(vkCmdSetStencilTestEnable, VkBool32)
 
 static VKAPI_ATTR void w_arg_vkCmdSetLineWidth(VkCommandBuffer cb, float w)
 {
@@ -420,6 +452,72 @@ static VKAPI_ATTR int32_t w_arg_vkBindImageMemory2(VkDevice d, uint32_t n, const
    return r;
 }
 
+static u64 arg_prints_bar2;
+static VKAPI_ATTR void w_arg_vkCmdPipelineBarrier2(VkCommandBuffer cb, const VkDependencyInfo *di)
+{
+   __atomic_add_fetch(&info_vkCmdPipelineBarrier2.calls, 1, __ATOMIC_RELAXED);
+   order("vkCmdPipelineBarrier2", cb);
+   if (trace_on && di && __atomic_add_fetch(&arg_prints_bar2, 1, __ATOMIC_RELAXED) <= 40) {
+      fprintf(stderr, "x400-vk: Barrier2 flags=0x%x mem=%u buf=%u img=%u\n", di->dependencyFlags, di->memoryBarrierCount, di->bufferMemoryBarrierCount, di->imageMemoryBarrierCount);
+      for (uint32_t i = 0; i < di->memoryBarrierCount && i < 2; i++) {
+         const VkMemoryBarrier2 *m = &di->pMemoryBarriers[i];
+         fprintf(stderr, "x400-vk:   mem  stage 0x%llx->0x%llx access 0x%llx->0x%llx\n", (unsigned long long)m->srcStageMask, (unsigned long long)m->dstStageMask, (unsigned long long)m->srcAccessMask, (unsigned long long)m->dstAccessMask);
+      }
+      for (uint32_t i = 0; i < di->imageMemoryBarrierCount && i < 3; i++) {
+         const VkImageMemoryBarrier2 *b = &di->pImageMemoryBarriers[i];
+         fprintf(stderr, "x400-vk:   img=%p layout %d->%d stage 0x%llx->0x%llx access 0x%llx->0x%llx queue %u->%u aspect=0x%x mips %u+%u layers %u+%u\n", (void *)b->image, b->oldLayout, b->newLayout,
+                 (unsigned long long)b->srcStageMask, (unsigned long long)b->dstStageMask, (unsigned long long)b->srcAccessMask, (unsigned long long)b->dstAccessMask,
+                 b->srcQueueFamilyIndex, b->dstQueueFamilyIndex, b->subresourceRange.aspectMask, b->subresourceRange.baseMipLevel, b->subresourceRange.levelCount, b->subresourceRange.baseArrayLayer, b->subresourceRange.layerCount);
+      }
+   }
+   ((void (*)(VkCommandBuffer, const VkDependencyInfo *))info_vkCmdPipelineBarrier2.real)(cb, di);
+}
+
+/* Samsung's Vulkan driver (Mali-G68) applies vkCmdSetDepthCompareOp even when the depth test is disabled, so NEVER/LESS make every fragment fail
+ * (measured with x400/test/vk-dynrender.c DEPTHOP=n: 0 and 1 draw nothing, 2, 3 and 7 draw). The spec says the compare op has no effect with the
+ * test disabled, and Zink sets compareOp=NEVER with testEnable=FALSE on every draw. This keeps, per command buffer, the last depth-test-enable
+ * and compare op the application set, and tells the driver ALWAYS while the test is off and the real op while it is on. X400_NO_DEPTHFIX=1 turns
+ * it off. */
+#define CB_N 256
+static struct { u64 cb; uint32_t test, op; int have_test, have_op; } cbst[CB_N];
+static pthread_mutex_t cb_mtx = PTHREAD_MUTEX_INITIALIZER;
+static unsigned cb_n;
+static int depthfix_on(void) { static int v = -1; if (v < 0) v = getenv("X400_NO_DEPTHFIX") == NULL; return v; }
+static unsigned cb_slot(u64 cb)
+{
+   for (unsigned i = 0; i < cb_n; i++) if (cbst[i].cb == cb) return i;
+   if (cb_n < CB_N) { cbst[cb_n].cb = cb; cbst[cb_n].test = 0; cbst[cb_n].op = 7; cbst[cb_n].have_test = cbst[cb_n].have_op = 0; return cb_n++; }
+   return CB_N - 1;
+}
+static uint32_t eff_op(unsigned i) { return (cbst[i].have_test && !cbst[i].test) ? 7u : cbst[i].op; }
+static u64 depthfix_prints;
+static VKAPI_ATTR void w_arg_vkCmdSetDepthTestEnable(VkCommandBuffer cb, VkBool32 v)
+{
+   __atomic_add_fetch(&info_vkCmdSetDepthTestEnable.calls, 1, __ATOMIC_RELAXED);
+   ((void (*)(VkCommandBuffer, VkBool32))info_vkCmdSetDepthTestEnable.real)(cb, v);
+   if (!depthfix_on()) return;
+   pthread_mutex_lock(&cb_mtx);
+   unsigned i = cb_slot((u64)cb); cbst[i].test = v; cbst[i].have_test = 1;
+   int resend = cbst[i].have_op; uint32_t op = eff_op(i);
+   pthread_mutex_unlock(&cb_mtx);
+   /* if the op was set before the test enable, the driver already got the raw op: send the effective one now */
+   if (resend && info_vkCmdSetDepthCompareOp.real) ((void (*)(VkCommandBuffer, uint32_t))info_vkCmdSetDepthCompareOp.real)(cb, op);
+}
+static VKAPI_ATTR void w_arg_vkCmdSetDepthCompareOp(VkCommandBuffer cb, uint32_t op)
+{
+   __atomic_add_fetch(&info_vkCmdSetDepthCompareOp.calls, 1, __ATOMIC_RELAXED);
+   uint32_t send = op;
+   if (depthfix_on()) {
+      pthread_mutex_lock(&cb_mtx);
+      unsigned i = cb_slot((u64)cb); cbst[i].op = op; cbst[i].have_op = 1;
+      send = eff_op(i);
+      pthread_mutex_unlock(&cb_mtx);
+      if (send != op && trace_on && __atomic_add_fetch(&depthfix_prints, 1, __ATOMIC_RELAXED) <= 8)
+         fprintf(stderr, "x400-vk: vkCmdSetDepthCompareOp(%u) with the depth test off -> %u\n", op, send);
+   }
+   ((void (*)(VkCommandBuffer, uint32_t))info_vkCmdSetDepthCompareOp.real)(cb, send);
+}
+
 static const struct { const char *name; struct fn_info *info; PFN_vkVoidFunction w; } trace_tbl[] = {
 #define ENTRY(n) { #n, &info_##n, (PFN_vkVoidFunction)w_##n },
 #define ENTRY_ARG(n) { #n, &info_##n, (PFN_vkVoidFunction)w_arg_##n },
@@ -441,6 +539,10 @@ static PFN_vkVoidFunction wrapper_for(const char *n, PFN_vkVoidFunction dflt)
    if (!strcmp(n, "vkCmdSetFrontFace")) return (PFN_vkVoidFunction)w_arg_vkCmdSetFrontFace;
    if (!strcmp(n, "vkCmdSetPrimitiveTopology")) return (PFN_vkVoidFunction)w_arg_vkCmdSetPrimitiveTopology;
    if (!strcmp(n, "vkCmdSetDepthTestEnable")) return (PFN_vkVoidFunction)w_arg_vkCmdSetDepthTestEnable;
+   if (!strcmp(n, "vkCmdSetDepthCompareOp")) return (PFN_vkVoidFunction)w_arg_vkCmdSetDepthCompareOp;
+   if (!strcmp(n, "vkCmdSetDepthWriteEnable")) return (PFN_vkVoidFunction)w_arg_vkCmdSetDepthWriteEnable;
+   if (!strcmp(n, "vkCmdSetDepthBoundsTestEnable")) return (PFN_vkVoidFunction)w_arg_vkCmdSetDepthBoundsTestEnable;
+   if (!strcmp(n, "vkCmdSetStencilTestEnable")) return (PFN_vkVoidFunction)w_arg_vkCmdSetStencilTestEnable;
    if (!strcmp(n, "vkCreateImage")) return (PFN_vkVoidFunction)w_arg_vkCreateImage;
    if (!strcmp(n, "vkCreateImageView")) return (PFN_vkVoidFunction)w_arg_vkCreateImageView;
    if (!strcmp(n, "vkCmdPipelineBarrier")) return (PFN_vkVoidFunction)w_arg_vkCmdPipelineBarrier;
@@ -452,7 +554,7 @@ static PFN_vkVoidFunction wrapper_for(const char *n, PFN_vkVoidFunction dflt)
    if (!strcmp(n, "vkCmdBlitImage")) return (PFN_vkVoidFunction)w_ord_vkCmdBlitImage;
    if (!strcmp(n, "vkCmdResolveImage")) return (PFN_vkVoidFunction)w_ord_vkCmdResolveImage;
    if (!strcmp(n, "vkCmdFillBuffer")) return (PFN_vkVoidFunction)w_ord_vkCmdFillBuffer;
-   if (!strcmp(n, "vkCmdPipelineBarrier2")) return (PFN_vkVoidFunction)w_ord_vkCmdPipelineBarrier2;
+   if (!strcmp(n, "vkCmdPipelineBarrier2")) return (PFN_vkVoidFunction)w_arg_vkCmdPipelineBarrier2;
    if (!strcmp(n, "vkCmdBindVertexBuffers2")) return (PFN_vkVoidFunction)w_arg_vkCmdBindVertexBuffers2;
    if (!strcmp(n, "vkCreateBuffer")) return (PFN_vkVoidFunction)w_arg_vkCreateBuffer;
    if (!strcmp(n, "vkBindBufferMemory")) return (PFN_vkVoidFunction)w_arg_vkBindBufferMemory;

@@ -37,6 +37,12 @@
  *                       VIEWPORT_WITH_COUNT / SCISSOR_WITH_COUNT, which then must be set before the draw). Implies EDS.
  *   env IMGOFF=n        allocate one 4 MiB block and bind the colour image at byte offset n inside it (Zink sub-allocates its images from shared blocks:
  *                       the layer trace shows them at 0, 393216, 786432, 1179648). n must be a multiple of the image's alignment
+ *   env REDRAW=1        draw, read the image back, then put the SAME image back to colour-attachment with Zink's barrier (TRANSFER_SRC ->
+ *                       COLOR_ATTACHMENT, srcStage TOP_OF_PIPE, srcAccess 0, dstAccess COLOR_ATTACHMENT_READ|WRITE) and draw again with loadOp=LOAD, reading
+ *                       the result at the end. The first draw uses CLEAR (blue); the second draws the triangle over a yellow fill left by a
+ *                       transfer clear. Zink does this on every glReadPixels followed by more drawing.
+ *   env DEPTHOP=n       the value passed to vkCmdSetDepthCompareOp (extended_dynamic_state), default VK_COMPARE_OP_ALWAYS (7). Zink passes 0 (NEVER) with the
+ *                       depth test DISABLED, which on Samsung's driver makes every fragment fail anyway. Implies EDS.
  *   env DEPTHFMT=1      the pipeline and the render pass also carry a depth attachment (KWin and Zink always have one)
  * Build in the guest: gcc -O1 -o vk-dynrender vk-dynrender.c -lvulkan. Exit 0 = the pixels are right. */
 #include <vulkan/vulkan.h>
@@ -94,7 +100,7 @@ int main(void)
   VkPhysicalDeviceExtendedDynamicStateFeaturesEXT eds = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTENDED_DYNAMIC_STATE_FEATURES_EXT, .extendedDynamicState = VK_TRUE };
   VkPhysicalDeviceExtendedDynamicState2FeaturesEXT eds2 = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTENDED_DYNAMIC_STATE_2_FEATURES_EXT, .extendedDynamicState2 = VK_TRUE, .extendedDynamicState2PatchControlPoints = getenv("PATCHCP") != NULL };
   int vindyn = getenv("VINDYN") != NULL, vbuf2 = getenv("VBUF2") != NULL, vbuf = getenv("VBUF") != NULL || vbuf2 || vindyn;
-  int use_eds = getenv("EDS") != NULL || getenv("EDS2") != NULL || vbuf2 || getenv("VPZERO") != NULL, use_eds2 = getenv("EDS2") != NULL || getenv("BIASDYN") != NULL || getenv("PATCHCP") != NULL;
+  int use_eds = getenv("EDS") != NULL || getenv("EDS2") != NULL || vbuf2 || getenv("VPZERO") != NULL || getenv("DEPTHOP") != NULL, use_eds2 = getenv("EDS2") != NULL || getenv("BIASDYN") != NULL || getenv("PATCHCP") != NULL;
   VkPhysicalDeviceVertexInputDynamicStateFeaturesEXT vids = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VERTEX_INPUT_DYNAMIC_STATE_FEATURES_EXT, .vertexInputDynamicState = VK_TRUE };
   VkPhysicalDeviceVulkan13Features want13 = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES, .dynamicRendering = VK_TRUE };
   void *chain = &want13;
@@ -259,6 +265,25 @@ int main(void)
     .loadOp = loadclear ? VK_ATTACHMENT_LOAD_OP_LOAD : (getenv("NOCLEAR") ? VK_ATTACHMENT_LOAD_OP_DONT_CARE : VK_ATTACHMENT_LOAD_OP_CLEAR), .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
     .clearValue = { .color = { { 0.1f, 0.2f, 0.9f, 1.0f } } } };
   VkRenderingInfo rinfo = { .sType = VK_STRUCTURE_TYPE_RENDERING_INFO, .renderArea = { { 0, 0 }, { W, H } }, .layerCount = 1, .colorAttachmentCount = 1, .pColorAttachments = &ca };
+  int redraw = getenv("REDRAW") != NULL;
+  if (redraw) {
+    /* pass 1: clear to blue, no triangle */
+    VkRenderingAttachmentInfo ca1 = ca; ca1.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+    VkRenderingInfo ri1 = rinfo; ri1.pColorAttachments = &ca1;
+    cmdBegin(rec, &ri1); cmdEnd(rec);
+    /* read it back (this is the glReadPixels in the middle) */
+    VkImageMemoryBarrier toS = toColor; toS.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT; toS.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+    toS.oldLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL; toS.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+    vkCmdPipelineBarrier(rec, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, NULL, 0, NULL, 1, &toS);
+    VkBufferImageCopy bcr = { .imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 }, .imageExtent = { W, H, 1 } };
+    vkCmdCopyImageToBuffer(rec, img, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, buf, 1, &bcr);
+    /* Zink's barrier on the way back to drawing: nothing to wait for (srcAccess 0), LOAD the previous contents */
+    VkImageMemoryBarrier back = toColor; back.srcAccessMask = 0; back.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+    back.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL; back.newLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    vkCmdPipelineBarrier(rec, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, 0, 0, NULL, 0, NULL, 1, &back);
+    ca.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+    rinfo.pColorAttachments = &ca;
+  }
   cmdBegin(rec, &rinfo);
   vkCmdBindPipeline(rec, VK_PIPELINE_BIND_POINT_GRAPHICS, pipe);
   if (!stat) {
@@ -275,7 +300,7 @@ int main(void)
       PFN_vkCmdSetCullMode scm = (void *)vkGetDeviceProcAddr(dev, "vkCmdSetCullModeEXT");
       PFN_vkCmdSetPrimitiveTopology spt = (void *)vkGetDeviceProcAddr(dev, "vkCmdSetPrimitiveTopologyEXT");
       svp(rec, 1, &vp); ssc(rec, 1, &sc);
-      sdt(rec, VK_FALSE); sdw(rec, VK_FALSE); sdc(rec, VK_COMPARE_OP_ALWAYS); sdb(rec, VK_FALSE); sst(rec, VK_FALSE);
+      sdt(rec, VK_FALSE); sdw(rec, VK_FALSE); sdc(rec, getenv("DEPTHOP") ? (VkCompareOp)atoi(getenv("DEPTHOP")) : VK_COMPARE_OP_ALWAYS); sdb(rec, VK_FALSE); sst(rec, VK_FALSE);
       sso(rec, VK_STENCIL_FACE_FRONT_AND_BACK, VK_STENCIL_OP_KEEP, VK_STENCIL_OP_KEEP, VK_STENCIL_OP_KEEP, VK_COMPARE_OP_ALWAYS);
       sff(rec, VK_FRONT_FACE_COUNTER_CLOCKWISE); scm(rec, VK_CULL_MODE_NONE); spt(rec, vbuf ? VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP : VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST);
     } else {
