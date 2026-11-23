@@ -49,6 +49,10 @@ pipewire > /tmp/pw.log 2>&1 &
 sleep 2
 wireplumber > /tmp/wp.log 2>&1 &
 sleep 2
+# Hardware groups (x400/HARDWARE.md): each ships /tmp/x400/<group>/guest.sh (bound by guest_start.sh); a failing one never stops the desktop.
+grp() { [ -f /tmp/x400/$1/guest.sh ] && { sh /tmp/x400/$1/guest.sh > /tmp/x400-$1.log 2>&1 & }; }
+grp audio
+grp camera
 # With Zink, KWin runs under gdb in batch mode: if it dies, the backtrace ends /tmp/kwin.log (guest_start.sh copies it out).
 KWIN=kwin_wayland
 # Zink 25.0.7 leaks one dma-buf fd per barrier on a client's buffer (the kernel has no DMA_BUF_IOCTL_EXPORT_SYNC_FILE): this shim closes it (x400/venus/zink-syncfd-leak.c)
@@ -87,6 +91,9 @@ kbuildsycoca6 > /tmp/syc.log 2>&1
 plasmashell > /tmp/plasma.log 2>&1 &
 sleep 4
 /tmp/inputd --touch /dev/input/event8 --pen /dev/input/event10 --grab > /tmp/inputd.log 2>&1 &
+grp input
+grp sensors
+grp radio
 sleep 8
 PIPEWIRE_DEBUG=${PWDBG:-2} /tmp/capture /tmp/fb/fb.bin > /tmp/capture.log 2>&1 &
 # RUNSECS=0 (OneOS session): stay until the way back ends this mount namespace; the desktop's processes are watched, and
