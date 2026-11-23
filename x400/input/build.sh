@@ -7,4 +7,5 @@ $WS client-header $P/fake-input.xml "$O/fake-input-client-protocol.h"; $WS priva
 aarch64-linux-gnu-gcc -O2 -Wall --sysroot=$R -I"$O" -I$R/usr/include -I$R/usr/include/aarch64-linux-gnu "$T/x400/display/inputd.c" "$O/fake-input-protocol.c" \
   -o "$T/x400/display/bin/inputd" -L$R/usr/lib/aarch64-linux-gnu -Wl,-rpath-link,$R/usr/lib/aarch64-linux-gnu -lwayland-client -lm
 for x in keys pentest; do aarch64-linux-gnu-gcc -O2 -Wall --sysroot=$R "$T/x400/input/$x.c" -o "$O/$x"; done
+mkdir -p "$T/x400/input/stage"; cp "$O/keys" "$T/x400/input/stage/keys"   # what deploy.sh pushes (stage/keys is not tracked)
 ls -l "$T/x400/display/bin/inputd" "$O/keys" "$O/pentest"

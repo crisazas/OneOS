@@ -19,3 +19,18 @@ switcher/assets/guest_manager.apk
 x400/test/vk-offscreen
 x400/test/tri_*.h
 x400/display/bin/
+# x400: binaries built by x400/*/build.sh and pushed by x400/oneos/deploy.sh (sources and scripts in stage/ stay tracked)
+x400/audio/out-android/
+x400/audio/stage/x400-aaudio
+x400/audio/stage/x400-audiod
+x400/audio/stage/x400-feed
+x400/audio/stage/x400-pwbridge
+x400/audio/stage/x400-setvol
+x400/audio/stage/x400-snd
+x400/input/stage/keys
+x400/sensors/stage/x400-sensord
+x400/camera/stage/fakesvc
+x400/camera/stage/sensormgr
+x400/camera/stage/x400-camd
+x400/camera/stage/x400-camsrc
+x400/camera/stage/x400-camtest
