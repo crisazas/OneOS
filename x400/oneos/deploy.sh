@@ -39,12 +39,13 @@ if [ "$1" != --scripts-only ]; then
     fi
     got=$(su_ "sha256sum $STAGE/system.raw" | cut -d' ' -f1 | tr -d '\r')
     [ "$got" = "$(sha256sum "$IMG" | cut -d' ' -f1)" ] || { echo "system.raw checksum mismatch on the tablet" >&2; exit 1; }
+    su_ "echo $got > $STAGE/rootfs.id && chmod 644 $STAGE/rootfs.id"
     echo "system.raw verified ($got)"
 fi
 INC=/data/local/tmp/x400_incoming
 KEYS=""; [ -f "$ROOT/out/input/keys" ] && KEYS=keys
 adb_ shell "mkdir -p $INC"
-adb_ push "$ROOT/x400/oneos/guest_prepare.sh" "$ROOT/x400/oneos/guest_start.sh" "$INC/" >/dev/null
+adb_ push "$ROOT/x400/oneos/guest_prepare.sh" "$ROOT/x400/oneos/guest_start.sh" "$ROOT/x400/oneos/persist-reset.sh" "$INC/" >/dev/null
 adb_ push "$ROOT/out/display/x400-display.dex" "$ROOT/out/display/libx400display.so" "$ROOT/x400/display/display.sh" \
          "$ROOT/x400/display/bin/capture" "$ROOT/x400/display/bin/inputd" $([ -f "$ROOT/out/input/keys" ] && echo "$ROOT/out/input/keys") "$ROOT/x400/phone/session-inner.sh" \
          "$ROOT/x400/phone/cpu-sample.sh" "$INC/" >/dev/null
@@ -58,9 +59,9 @@ if [ -f "$ROOT/out/mesa-guest/libvulkan_virtio.so" ]; then
     adb_ push "$ROOT/out/mesa-guest/libvulkan_virtio.so" "$INC/libvulkan_virtio.so" >/dev/null
     su_ "mkdir -p $STAGE/x400 && cp -f $INC/libvulkan_virtio.so $STAGE/x400/libvulkan_virtio.so && chmod 644 $STAGE/x400/libvulkan_virtio.so && chcon u:object_r:apex_data_file:s0 $STAGE/x400/libvulkan_virtio.so"
 fi
-su_ "cp -f $INC/guest_prepare.sh $INC/guest_start.sh $STAGE/ && chmod 755 $STAGE/guest_prepare.sh $STAGE/guest_start.sh && \
+su_ "cp -f $INC/guest_prepare.sh $INC/guest_start.sh $INC/persist-reset.sh $STAGE/ && chmod 755 $STAGE/guest_prepare.sh $STAGE/guest_start.sh $STAGE/persist-reset.sh && \
      mkdir -p $STAGE/x400 && cd $INC && cp -f x400-display.dex libx400display.so display.sh capture inputd $KEYS session-inner.sh cpu-sample.sh x400vt $STAGE/x400/ && \
-     chmod 755 $STAGE/x400/* && chown -R 0:0 $STAGE/x400 $STAGE/guest_prepare.sh $STAGE/guest_start.sh && rm -rf $INC"
+     chmod 755 $STAGE/x400/* && chown -R 0:0 $STAGE/x400 $STAGE/guest_prepare.sh $STAGE/guest_start.sh $STAGE/persist-reset.sh && rm -rf $INC"
 # what each hardware group ships (x400/HARDWARE.md): x400/<group>/stage/ goes to $STAGE/x400/groups/<group>/ as it is
 for gd in "$ROOT"/x400/*/stage; do
     [ -d "$gd" ] || continue; gn=$(basename "$(dirname "$gd")")

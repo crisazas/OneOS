@@ -139,6 +139,7 @@ Second start from zero, same session (`guest.sh stop`, flag files removed from `
 - `bluetoothctl scan` found 12 devices; no other BLE/BR device types were tried. LE with `Privacy=off` only.
 - Reboot-time behavior: the flags are in the stage, so a new session starts both radios; this was shown by a manual `guest.sh` run with the stage flags, not by restarting the session.
 - NM/BlueZ state is RAM only (overlay on `/etc` and `/var/lib`): pairings and manually added networks vanish with the session. Only the One UI network is regenerated from `WifiConfigStore.xml` at each start.
+  (Superseded on 2026-11-23: the guest's root is now a persistent overlay, `x400/oneos/guest_prepare.sh`, and `radio/stage/guest.sh` no longer makes the RAM overlays when `/etc` and `/var/lib` are writable, so networks and pairings are kept. Not re-measured for the radios: only files, packages and `/etc` were.)
 
 ## 7. Persistent flags
 `x400/radio/stage/enable-wifi` and `x400/radio/stage/enable-bt` (empty files, committed). `deploy.sh` pushes `stage/` to `/data/local/tmp/oneos/x400/groups/radio/`, `guest_start.sh` binds it at `/tmp/x400/radio`, and `guest.sh` looks for `enable-*` there (and in `/run/x400-radio/`). To turn one off: delete the file from the stage (or `rm` it on the tablet in `/data/local/tmp/oneos/x400/groups/radio/`). `session-inner.sh` already runs `grp radio` after inputd.

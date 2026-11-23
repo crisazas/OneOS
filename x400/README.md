@@ -70,7 +70,14 @@ OneOS's own scripts (`switcher/assets/`, `oneos_switch.sh`) do the preflight, st
   replaces `guest_prepare.sh` and `guest_start.sh` with `x400/oneos/`'s, and puts the desktop's pieces (`capture`, `inputd`, `x400vt`, the display helper, `session-inner.sh`, Mesa 25.0.7) in `/data/local/tmp/oneos/x400`.
   It refuses to run while a session is mounted.
 - Start, on the tablet as root: `cd /data/local/tmp/oneos && ONEOS_RETURN_MODE=inplace sh oneos_switch.sh`. The log is where you redirect it; the desktop's is `/data/local/tmp/oneos/data/takeover.log`.
-  `guest_prepare.sh` attaches `system.raw` read-only on a loop device and mounts it; `guest_start.sh` mounts a 32 MB tmpfs for `fb.bin`, starts `x400vt`, then `session-inner.sh` (KWin, Plasma), `capture` and the display helper.
+  `guest_prepare.sh` attaches `system.raw` read-only on a loop device and builds the guest's root over it (next item); `guest_start.sh` mounts a 32 MB tmpfs for `fb.bin`, starts `x400vt`, then `session-inner.sh` (KWin, Plasma), `capture` and the display helper.
+- **What is kept between sessions.** The root is an overlay: `system.raw` (read-only, never written) is the lower layer, and everything the guest changes (installed packages, `/etc`, `/root`, `/home`, `/var`, `/opt`)
+  goes to `/data/local/tmp/oneos/persist.img`, an ext4 file on a loop device (8 GB, sparse: it takes space as it is written; `X400_PERSIST_SIZE` sets it when it is created), checked with `e2fsck -p` at each start.
+  It is a file and not a directory because this kernel refuses f2fs (what `/data` is) as an overlay upper layer (`overlayfs: filesystem ... not supported`). OneOS has no such layer: it keeps the Android guest's state in a directory bound as the guest's `/data`.
+  Measured on 2026-11-23: files in `/root` and `/etc`, a script in `/usr/local/bin` and `apt-get install tree` survived returning to One UI and starting the session again; `e2fsck -n` after the return: clean.
+  `X400_PERSIST=0` gives the old read-only root with nothing kept. If the layer cannot be mounted, `guest_prepare.sh` says so and falls back to that. `deploy.sh` writes `rootfs.id` (the image's sha256) and the layer keeps it: a layer made over
+  another image is not used (it would hide the new image's files); `sh /data/local/tmp/oneos/persist-reset.sh` (One UI up) moves it aside to `persist.img.old-<epoch>` and the next session starts a clean one.
+  **Not tested:** a reboot of the tablet or any other abrupt cut with the layer mounted, the refusal after the image changed, and the frame rate with the overlay (the fps above were measured without it).
 - Way back: hold **Volume Up + Volume Down for 3 s**, or `setprop oneos.guest.powerctl app:x400`. OneOS restores One UI in place and checks it (`auto_return.log`).
   If the guest cannot be prepared, the switch returns to One UI by itself (it did once with `losetup` not finding `system.raw`; the same command worked a minute later).
 - A reboot loses root (DFroot) and the session; the stage under `/data/local/tmp/oneos` survives it.

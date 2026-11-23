@@ -36,6 +36,8 @@ mkdir -p $RUN && chmod 700 $RUN
 #    there lives in RAM and vanishes with the session. Must come first: a later overlay would cover earlier mounts.
 rw_overlay() {
   mountpoint -q "$1" && return 0
+  # with the persistent root (x400/oneos/guest_prepare.sh) /etc and /var/lib are already writable and kept: a RAM overlay here would hide them
+  touch "$1/.x400w" 2>/dev/null && { rm -f "$1/.x400w"; return 0; }
   mkdir -p "$RUN/ov$1/up" "$RUN/ov$1/work" && mount -t overlay overlay -o "lowerdir=$1,upperdir=$RUN/ov$1/up,workdir=$RUN/ov$1/work" "$1" 2>>"$LOG" || log "overlay on $1 failed"
 }
 rw_overlay /etc
