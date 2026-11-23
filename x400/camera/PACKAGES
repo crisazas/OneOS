@@ -1,0 +1,11 @@
+# Packages for the camera path, checked with apt-cache / apt-get -s in out/rootfs-plasma (resolute, arm64).
+# Already in the image: pipewire, wireplumber (v4l2 monitor scripts), libpipewire-0.3-dev, libspa-0.2-modules (spa/v4l2, videoconvert).
+# Direct 'apt-get -s install' of this list adds 32 packages (31 without gstreamer1.0-tools).
+xdg-desktop-portal
+xdg-desktop-portal-kde
+gstreamer1.0-pipewire
+gstreamer1.0-plugins-good
+gstreamer1.0-tools
+pipewire-v4l2
+v4l-utils
+# Optional: kamoso (KDE camera app; pulls gstreamer1.0-plugins-bad, gstreamer1.0-qt6, qml6-module-org-kde-purpose...) to see the camera as a user would.
