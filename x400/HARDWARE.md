@@ -43,6 +43,66 @@ Not tested by a person: rotating the tablet by hand, a finger or the real S Pen 
 - `guest_start.sh` stops the radio and camera groups when the way back starts (`oneos_rec_stop`), before the guest is killed: otherwise Bluetooth stays held by a dead relay in One UI.
 - `x400/rootfs-extras.sh` installs every `x400/*/PACKAGES` (minus `x400/NOT-IN-IMAGE`) and the groups' `image-conf` into the image; start a session with `ONEOS_GUEST_AUDIO=0 ONEOS_RETURN_MODE=inplace sh oneos_switch.sh`.
 
+## Verification run (2026-11-23 11:46, session that started by itself at 11:37)
+`sh x400/verify-session.sh` (PC, adb, root on the tablet) checks every group and prints one line per check. Literal output of that run, 39 OK and no FAIL:
+
+```
+== session: 11:46:45 kwin 27086, mode 2112x1320@120.00*, tombstones 64
+OK   process kwin_wayland [27086]
+OK   process plasmashell [28812]
+OK   process pipewire [26496]
+OK   process wireplumber [26745]
+OK   process inputd [30072]
+OK   process keys [30075]
+OK   process x400-pwbridge [26995]
+OK   process x400-camsrc [27005]
+OK   process x400-sensord [27641]
+OK   process upowerd [27799]
+OK   process NetworkManager [27844]
+OK   process wpa_supplicant [27680]
+OK   process bluetoothd [28168]
+OK   process btattach [28166]
+OK   process x400-audiod [25428]
+OK   process x400-camd [25940]
+OK   process fakesvc [25607]
+OK   process audioserver [2296]
+== G1 input
+OK   inputd holds the touchscreen (inputd: /dev/input/event8 range 1319x2111 (grabbed))
+OK   keys reads event0/event1 without grab (4 power presses so far)
+OK   kwinrc selects plasma-keyboard
+== G2 sensors and power
+OK   SensorProxy HasAccelerometer true
+OK   SensorProxy HasAmbientLight true
+OK   UPower battery:  state: fully-charged  voltage: 4.376 V  percentage: 100%  History (voltage):
+OK   brightness (value max percent): 11 308 3
+OK   KWin rotation left=2 then none=1 (put back)
+== G3 audio
+OK   audio_policy has STREAM_MUSIC range 0..15 (x400-setvol)
+OK   tone of the guest reached x400-audiod: 11:46:54 out: 71040 bytes, 17760 frames, rms=0.02614 peak=0.0562
+NOTE speaker output itself is judged by ear (the tablet's own microphone loses a continuous tone after ~5 s; x400/audio/RESULT.md)
+== G4 radios
+OK   wlan0 GENERAL.STATE:100 (connected) IP4.ADDRESS[1]:192.168.68.109/22
+OK   NetworkManager connectivity: full
+OK   HTTPS example.com -> 200
+OK   hci0 UP RUNNING, 	BD Address: 24:A4:52:12:2C:F7 ACL MTU:
+OK   bluetoothctl Powered: yes
+== G5 cameras
+OK   no useless v4l2 nodes from the ISP
+OK   our PipeWire nodes: camera front/back, Altavoces, Microfono
+OK   camera front delivered 28.5 fps to the guest
+OK   camera back delivered 28.5 fps to the guest
+OK   cameras closed again after the clients left
+== G6 display
+OK   helper: x400-display: 7500 frames shown, 22.6 fps over the last 13.3 s (vulkan: acquire mean 0.13 ms max 1.9
+== end: tombstones 64, x400vt [26099], kwin [27086]
+```
+
+Notes on the numbers:
+- Cameras: 30.8 and 28.9 fps here; 31.0 and 29.3 in an earlier run of the same session. Image content was checked by looking at a frame of each (a room with a bottle and a lamp; a foam box on a desk).
+- Audio: "reached x400-audiod" proves the PCM got to Android's AAudio; that the speaker sounds was heard by the owner. The tablet's own microphone is not a reliable witness for a continuous tone (see `x400/audio/RESULT.md`).
+- The rotation check rotates the output to `left` and puts it back to `none`; nothing else in the script changes state.
+- Helper fps (114.3 over the last 2.6 s) is a short window of an idle desktop, not a benchmark: the measured frame rates are in `x400/README.md`.
+
 ## Known crash (2026-11-23, kernel oops 06:22:59)
 Opening an ABOX capture PCM that Android's audio HAL already holds (`pcmC0D118c`, the amplifier reference/IV-sense) while a playback stream runs panics the kernel:
 `Oops: Fatal exception`, `pc: abox_wdma_mute_stream+0x38` from `snd_soc_dai_digital_mute` (`snd_soc_samsung_abox`). The reboot loses root and the session.
