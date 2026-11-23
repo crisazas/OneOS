@@ -1,0 +1,4 @@
+# G3 audio. Already in the image: pipewire, wireplumber, libspa-0.2-modules (alsa plugin), pw-cat, wpctl, libasound2t64.
+alsa-utils
+alsa-ucm-conf
+pipewire-alsa

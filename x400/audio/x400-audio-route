@@ -1,0 +1,19 @@
+#!/bin/sh
+# Apply a pre-expanded Samsung mixer route (routes/<name>.tsv, generated from
+# /vendor/etc/mixer_paths.xml with expand-path.py) through x400-snd.
+# Plain sh: works on the Android host and inside the guest (both see /dev/snd).
+#
+#   x400-audio-route init                 initial A-Box controls
+#   x400-audio-route <name> [<name> ...]  media-speaker, media-mic, media-dualmic, media-usb-headphone
+#
+# STATUS: the routes apply cleanly but no audio flows yet; the aw882xx amplifiers
+# never see an I2S clock (RESULT.md).
+D=$(dirname "$0")
+SND=${X400_SND:-$D/x400-snd}
+CARD=${X400_CARD:-0}
+[ $# -gt 0 ] || { sed -n '2,10p' "$0"; exit 1; }
+for r in "$@"; do
+    f="$D/routes/$r.tsv"
+    [ -f "$f" ] || { echo "no route $r" >&2; exit 1; }
+    "$SND" ctl "$CARD" batch < "$f" >/dev/null || { echo "route $r: some controls failed" >&2; exit 1; }
+done
