@@ -1,0 +1,18 @@
+# G4 radios (Wi-Fi and Bluetooth). Checked with apt-cache / apt-get -s --no-install-recommends in out/rootfs-plasma (resolute, arm64).
+# Already in the image: dbus, dbus-daemon, polkitd, udev (systemd-udevd), libudev1, python3, pipewire, wireplumber, libkf6networkmanagerqt6.
+# Wi-Fi: Ubuntu wpa_supplicant + NetworkManager (the Android supplicant is stopped, its socket does not exist). 8 new packages, ~6 MB.
+wpasupplicant
+iw
+rfkill
+wireless-regdb
+# Wi-Fi UI. WARNING: plasma-nm Depends on libqt6webenginecore6 (+ -bin, -widgets6, -data): 46 new packages, ~289 MB installed (~250 MB is QtWebEngine). Fits in the 3.9 GB free of the 5.9 GB image.
+network-manager
+plasma-nm
+# Bluetooth: bluez gives bluetoothd + btattach/btmgmt/btmon/hciconfig; bluedevil is the Plasma UI; libspa-0.2-bluetooth is PipeWire's A2DP plugin. 25 new packages, ~30 MB.
+bluez
+bluedevil
+libspa-0.2-bluetooth
+# Image changes that are not packages (G0, see RESEARCH.md sections 1.2 and 1.5):
+#   /etc/resolv.conf -> /run/NetworkManager/resolv.conf (symlink at build time; the guest has no resolv.conf today)
+#   /etc/NetworkManager/conf.d/x400.conf (unmanaged-devices=except:interface-name:wlan0; route table 1014 per profile) comes from x400/radio/ later
+#   persistent bind-mount sources for /etc/NetworkManager/system-connections, /var/lib/NetworkManager and /var/lib/bluetooth (the rootfs is read-only)
