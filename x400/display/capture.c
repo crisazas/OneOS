@@ -1,9 +1,14 @@
-// linux-x400: asks KWin (zkde_screencast_unstable_v1) for a PipeWire stream of its first output and copies every frame
-// into the frame file (fb.h) that the display helper shows on the tablet. Runs inside the chroot.
-// Usage: capture FILE   (env WAYLAND_DISPLAY, XDG_RUNTIME_DIR; PipeWire must be running)
+// linux-x400: asks KWin (zkde_screencast_unstable_v1) for a PipeWire stream of its first output and hands every frame to the
+// display helper that shows it on the tablet. Runs inside the chroot.
+// With the helper connected to FILE.sock, a frame is not copied: the PipeWire buffer (a memfd KWin allocated) is kept and its
+// descriptor is sent to the helper (SCM_RIGHTS), which reads the pixels from it and answers when done. Without the helper
+// the frame is copied into the frame file FILE (fb.h), as before. FILE's seq counts the frames in both modes.
+// Usage: capture FILE   (env WAYLAND_DISPLAY, XDG_RUNTIME_DIR; PipeWire must be running; X400_NOFD=1 never uses the socket)
 #define _GNU_SOURCE
 #include "fb.h"
 #include "zkde-screencast-unstable-v1-client-protocol.h"
+#include "fdframe.h"
+#include <errno.h>
 #include <fcntl.h>
 #include <pipewire/pipewire.h>
 #include <spa/param/video/format-utils.h>
@@ -12,6 +17,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
+#include <sys/socket.h>
+#include <sys/un.h>
 #include <time.h>
 #include <unistd.h>
 #include <wayland-client.h>
@@ -25,6 +32,99 @@ static struct pw_stream *stream;
 static struct spa_video_info_raw vinfo;
 static uint8_t *map; static size_t map_size; static const char *path;
 static uint64_t seq, frames; static struct timespec t0;
+
+struct bufinfo { uint32_t id; int sent; };
+static struct bufinfo *infos[32]; static uint32_t next_id = 1;
+static int lsock = -1, csock = -1;
+static struct spa_source *lsrc, *csrc;
+static struct pw_buffer *inflight, *pending;
+static uint64_t sent_frames, copied_frames;
+
+static void count_frame(void)
+{
+  if (++frames % 120 == 0) {
+    struct timespec t1; clock_gettime(CLOCK_MONOTONIC, &t1);
+    double dt = (t1.tv_sec - t0.tv_sec) + (t1.tv_nsec - t0.tv_nsec) * 1e-9;
+    fprintf(stderr, "capture: %llu frames, %.1f fps over the last %.1f s (%llu by descriptor, %llu copied)\n", (unsigned long long)frames, 120 / dt, dt,
+            (unsigned long long)sent_frames, (unsigned long long)copied_frames);
+    t0 = t1;
+  }
+}
+
+static void drop_client(void)
+{
+  if (csrc) { pw_loop_destroy_source(pw_main_loop_get_loop(loop), csrc); csrc = NULL; }
+  if (csock >= 0) { close(csock); csock = -1; fprintf(stderr, "capture: the display helper left the socket; copying into the frame file again\n"); }
+  if (inflight) { pw_stream_queue_buffer(stream, inflight); inflight = NULL; }
+  if (pending) { pw_stream_queue_buffer(stream, pending); pending = NULL; }
+  for (int i = 0; i < 32; i++) if (infos[i]) infos[i]->sent = 0;
+}
+
+static int send_frame(struct pw_buffer *b)
+{
+  struct spa_data *sd = &b->buffer->datas[0]; struct bufinfo *bi = b->user_data;
+  struct fb_header *h = (struct fb_header *)map;
+  struct fd_msg m = { .type = FDM_FRAME, .id = bi->id, .has_fd = !bi->sent, .width = vinfo.size.width, .height = vinfo.size.height,
+                      .stride = sd->chunk->stride ? (uint32_t)sd->chunk->stride : vinfo.size.width * 4, .offset = sd->chunk->offset,
+                      .mapoffset = sd->mapoffset, .maxsize = sd->maxsize, .seq = h ? h->seq : 0 };
+  struct iovec iov = { &m, sizeof m };
+  char cb[CMSG_SPACE(sizeof(int))] = {0};
+  struct msghdr mh = { .msg_iov = &iov, .msg_iovlen = 1 };
+  if (m.has_fd) {
+    mh.msg_control = cb; mh.msg_controllen = sizeof cb;
+    struct cmsghdr *c = CMSG_FIRSTHDR(&mh); c->cmsg_level = SOL_SOCKET; c->cmsg_type = SCM_RIGHTS; c->cmsg_len = CMSG_LEN(sizeof(int));
+    int fd = (int)sd->fd; memcpy(CMSG_DATA(c), &fd, sizeof fd);
+  }
+  if (sendmsg(csock, &mh, MSG_NOSIGNAL) != (ssize_t)sizeof m) return -1;
+  bi->sent = 1; inflight = b; sent_frames++;
+  return 0;
+}
+
+static void on_client(void *d, int fd, uint32_t mask)
+{
+  (void)d; (void)fd;
+  struct fd_reply r; ssize_t n = 0;
+  if (mask & SPA_IO_IN) n = recv(csock, &r, sizeof r, MSG_DONTWAIT);
+  if ((mask & (SPA_IO_ERR | SPA_IO_HUP)) || n == 0 || (n < 0 && errno != EAGAIN)) { drop_client(); return; }
+  if (n != (ssize_t)sizeof r || r.type != FDM_DONE) return;
+  if (inflight && ((struct bufinfo *)inflight->user_data)->id == r.id) {
+    pw_stream_queue_buffer(stream, inflight); inflight = NULL;
+    if (pending) { struct pw_buffer *p = pending; pending = NULL; if (send_frame(p) < 0) { pw_stream_queue_buffer(stream, p); drop_client(); } }
+  }
+}
+
+static void on_accept(void *d, int fd, uint32_t mask)
+{
+  (void)d; (void)mask;
+  int c = accept4(fd, NULL, NULL, SOCK_CLOEXEC);
+  if (c < 0) return;
+  if (csock >= 0) drop_client();
+  csock = c;
+  csrc = pw_loop_add_io(pw_main_loop_get_loop(loop), csock, SPA_IO_IN | SPA_IO_ERR | SPA_IO_HUP, false, on_client, NULL);
+  fprintf(stderr, "capture: the display helper connected: frames go by descriptor\n");
+}
+
+static void on_add_buffer(void *d, struct pw_buffer *b)
+{
+  (void)d;
+  struct bufinfo *bi = calloc(1, sizeof *bi); if (!bi) return;
+  bi->id = next_id++; b->user_data = bi;
+  for (int i = 0; i < 32; i++) if (!infos[i]) { infos[i] = bi; break; }
+}
+
+static void on_remove_buffer(void *d, struct pw_buffer *b)
+{
+  (void)d;
+  struct bufinfo *bi = b->user_data; if (!bi) return;
+  if (b == inflight) inflight = NULL;
+  if (b == pending) pending = NULL;
+  if (csock >= 0 && bi->sent) {
+    struct fd_msg m = { .type = FDM_DROP, .id = bi->id };
+    if (send(csock, &m, sizeof m, MSG_NOSIGNAL) != (ssize_t)sizeof m) drop_client();
+  }
+  for (int i = 0; i < 32; i++) if (infos[i] == bi) infos[i] = NULL;
+  free(bi); b->user_data = NULL;
+}
 
 static void reg_global(void *d, struct wl_registry *r, uint32_t id, const char *iface, uint32_t ver)
 {
@@ -63,27 +163,32 @@ static void on_param(void *d, uint32_t id, const struct spa_pod *param)
 static void on_process(void *d)
 {
   (void)d;
-  struct pw_buffer *b = pw_stream_dequeue_buffer(stream);
+  struct pw_buffer *b = pw_stream_dequeue_buffer(stream), *n;
   if (!b) return;
+  while ((n = pw_stream_dequeue_buffer(stream))) { pw_stream_queue_buffer(stream, b); b = n; }
   struct spa_data *sd = &b->buffer->datas[0];
-  if (map && sd->data && sd->chunk->size) {
+  if (map && sd->data && sd->chunk->size && !(sd->chunk->flags & SPA_CHUNK_FLAG_CORRUPTED)) {
     struct fb_header *h = (struct fb_header *)map;
+    if (csock >= 0 && sd->type == SPA_DATA_MemFd && b->user_data) {
+      if (!inflight) { if (send_frame(b) < 0) { pw_stream_queue_buffer(stream, b); drop_client(); return; } }
+      else { if (pending) pw_stream_queue_buffer(stream, pending); pending = b; }
+      __atomic_store_n(&h->seq, ++seq, __ATOMIC_RELEASE);
+      count_frame();
+      return;
+    }
     uint32_t stride = sd->chunk->stride ? (uint32_t)sd->chunk->stride : h->width * 4;
     const uint8_t *src = (const uint8_t *)sd->data + sd->chunk->offset;
     for (uint32_t y = 0; y < h->height; y++) memcpy(map + FB_PIXELS + (size_t)y * h->stride, src + (size_t)y * stride, h->width * 4);
     __atomic_store_n(&h->seq, ++seq, __ATOMIC_RELEASE);
-    if (++frames % 120 == 0) {
-      struct timespec t1; clock_gettime(CLOCK_MONOTONIC, &t1);
-      double dt = (t1.tv_sec - t0.tv_sec) + (t1.tv_nsec - t0.tv_nsec) * 1e-9;
-      fprintf(stderr, "capture: %llu frames, %.1f fps over the last %.1f s\n", (unsigned long long)frames, 120 / dt, dt);
-      t0 = t1;
-    }
+    copied_frames++;
+    count_frame();
   }
   pw_stream_queue_buffer(stream, b);
 }
+
 static void on_state(void *d, enum pw_stream_state o, enum pw_stream_state n, const char *e)
 { (void)d; (void)o; fprintf(stderr, "capture: stream %s%s%s\n", pw_stream_state_as_string(n), e ? ": " : "", e ? e : ""); if (n == PW_STREAM_STATE_ERROR) pw_main_loop_quit(loop); }
-static const struct pw_stream_events ev = { PW_VERSION_STREAM_EVENTS, .state_changed = on_state, .param_changed = on_param, .process = on_process };
+static const struct pw_stream_events ev = { PW_VERSION_STREAM_EVENTS, .state_changed = on_state, .param_changed = on_param, .process = on_process, .add_buffer = on_add_buffer, .remove_buffer = on_remove_buffer };
 
 int main(int argc, char **argv)
 {
@@ -103,6 +208,15 @@ int main(int argc, char **argv)
   fprintf(stderr, "capture: KWin's stream is PipeWire node %u\n", node);
   pw_init(&argc, &argv);
   loop = pw_main_loop_new(NULL);
+  if (!getenv("X400_NOFD")) {
+    struct sockaddr_un sa = { .sun_family = AF_UNIX };
+    if (snprintf(sa.sun_path, sizeof sa.sun_path, "%s.sock", path) < (int)sizeof sa.sun_path) {
+      unlink(sa.sun_path);
+      lsock = socket(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0);
+      if (lsock >= 0 && (bind(lsock, (struct sockaddr *)&sa, sizeof sa) || listen(lsock, 1))) { perror("capture: socket"); close(lsock); lsock = -1; }
+      if (lsock >= 0) { lsrc = pw_loop_add_io(pw_main_loop_get_loop(loop), lsock, SPA_IO_IN, false, on_accept, NULL); fprintf(stderr, "capture: listening on %s\n", sa.sun_path); }
+    }
+  }
   stream = pw_stream_new_simple(pw_main_loop_get_loop(loop), "x400-capture", pw_properties_new(PW_KEY_MEDIA_TYPE, "Video", PW_KEY_MEDIA_CATEGORY, "Capture", PW_KEY_MEDIA_ROLE, "Screen", NULL), &ev, NULL);
   uint8_t b[1024]; struct spa_pod_builder pb = SPA_POD_BUILDER_INIT(b, sizeof b);
   const struct spa_pod *p = spa_pod_builder_add_object(&pb, SPA_TYPE_OBJECT_Format, SPA_PARAM_EnumFormat,
