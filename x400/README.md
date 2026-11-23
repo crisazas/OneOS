@@ -14,7 +14,15 @@ The desktop is drawn by the tablet's GPU, not by llvmpipe. Measured on the table
   (Vulkan, present mode mailbox). With one `es2gears` on Zink as the load, KWin used ~263 ticks per 5 s with that stream against ~410 with shared memory, and the helper's `acquire` took 0.14 ms (mean).
 - **120 Hz mode:** KWin's virtual output has one 60 Hz mode; `session-inner.sh` adds a 120 Hz one with `kscreen-doctor` and makes it current (`X400_HZ=60` keeps 60). It is above the panel's 90 Hz on purpose: it gave the most frames (see the comment in the script).
 - **Frame rate:** the frames that reach the layer went from ~7 fps (shared memory, `capture` copying into a file) to ~41 fps at 60 Hz and ~51 fps at 90 Hz with one `es2gears` on Zink.
-  **90 fps is not reached**: with that client KWin hands about 51-62 frames/s to the screencast and `kwin_wayland` is at ~58 % of a core, so the limit is not the CPU. Why is not known yet.
+  With `wl-client` (`x400/test/wl-client.c`, draws almost nothing, so it measures the chain and not a client), `capture` restarted at each mode, mean of 3 runs, frames shown by the helper:
+  **63 fps at 90 Hz and 81 at 120 Hz** (80.6-81.1 across the runs); without `vtest-sync-pool.patch` it was 53 and 67. **90 fps is not reached.**
+- **What limits it (measured):** KWin's main thread. `simpleperf` on it (120 Hz, before the pool): ~60 % of a core busy, kernel 28 %, Zink 19 %, KWin's own code 17 %, Venus 6 %;
+  `ScreenCastStream::record` is ~30 % and the scene paint ~47 % of its CPU. Each `vkGetFenceFdKHR`/`vkGetSemaphoreFdKHR` did a `VCMD_SYNC_CREATE` round trip to `x400vt` (~330/s) and the main thread waited on the socket ~200 ms
+  per second. `x400/venus/guest-mesa/vtest-sync-pool.patch` removes it (the fd is an `eventfd` that is already signaled; nothing waited on that sync): `SYNC_CREATE` and `SYNC_UNREF` went to 0/s and the wait to ~1 ms/s.
+  Tried and discarded: a KWin with `maxPendingFrameCount` 2 (a binary patch of the constructor) presented fewer frames, ~60 instead of ~87 at 90 Hz (the virtual backend's `present()` replaces the frame it holds, which would explain it; not checked).
+  The stream's `max framerate` is fixed when `capture` connects, so a mode change needs `capture` restarted (an earlier sweep that did not was wrong).
+- **Not known yet:** what is left of the cost in KWin's main thread (Zink and the kernel), whether `x400vt`'s `SUBMIT_CMD2` (~460-780/s after the pool, up to 10 ms) is the next limit, and why KWin presents ~23 % of the 120 Hz vblanks late
+  even alone. The 120 Hz mode is above the panel's 90 Hz on purpose (mailbox presents without waiting): it gave the most frames at every point measured.
 - **Not measured:** a long session (hours), heat, battery, more than two simultaneous GPU clients, and the picture with anything other than `es2gears` and the desktop itself.
   The panel was looked at by eye (orientation, colours, no cuts or artefacts); no automated image check was made.
 
