@@ -241,3 +241,54 @@ Cleanup: the chroot shares Android's PID space; `plasma.sh` only kills processes
   the CPU before presenting: **it is the same thing we already have with `vkr-dma-heap.patch`**. Limits: their WSI is X11 with a private Termux:X11 protocol (KWin-Wayland does not
   have it), `kbase_kmod_bo_export` is not implemented, and with Zink they only reach OpenGL 2.1 (KWin 6 asks for 3.1). They warn about kernel reboots with kbase in containers.
   None of the devices in the chroot guide is Exynos/G68.
+
+---
+## From a working Zink to the layer at 90 Hz (2026-11-22/23)
+Everything below was measured on the tablet unless it says otherwise. "One run" means one run: no repetitions.
+
+### Where it stood after point 7 above
+KWin ran on Zink on Venus on the Mali-G68, but slowly and with black cuts: ~3-4 fps against 2.2 with llvmpipe. The frame went KWin -> memfd (read back from the GPU by the CPU) -> `capture`
+(11 MB `memcpy` into `fb.bin` on f2fs) -> the helper (another `memcpy` into the layer).
+
+### What was found, in the order it was found
+1. **`fb.bin` on f2fs cost flash writes, not frame rate.** 626 frames of 11 MB (~24 s, `es2gears`) wrote ~56 MB to flash (`nr_written` +13 707 pages); on tmpfs the same kind of load wrote under 0.5 MB.
+   The owner saw the black cuts disappear. `guest_start.sh` now mounts a 32 MB tmpfs over the frame directory. It did not change the fps.
+2. **The Venus server `x400vt` died with `SIGSEGV!` when a second Zink client connected, and KWin then spun at 100 % of a core** (42 409 `read()` calls per second on a dead socket, all returning 0): that was the "slow" the owner felt.
+   The tombstone showed two threads writing to address 0 on the same list: the main thread in `vtest_sync_create` (`list_del` of `free_syncs`), `vkr-queue-1` in `vtest_write_context_fence` -> `vtest_unref_sync` (`list_add`).
+   `x400/venus/vtest-sync-lock.patch` puts one mutex around that list, `next_sync_id` and the refcounts; `x400/venus/vtest-segv-tombstone.patch` makes the server hand the signal back to Android so a tombstone is written.
+   With the lock, two `es2gears` on Zink for 300 s: `x400vt` alive, no new tombstone. **Not fixed:** `vtest_signal_sync` walks `active_contexts` and `sync_waits` from the queue threads while the main thread edits them; still unlocked.
+3. **KWin's main thread was 87-90 % one `memcpy`**, read from `simpleperf` call graphs (DWARF, no ptrace) and symbolised with Mesa's debug build: `ScreenCastStream::record` -> `glGetnTexImage` -> `st_GetTexSubImage` -> `copy_to_staging_dest` -> `memcpy`.
+   It is the screencast consumer that triggers it: with no consumer connected KWin used ~200 ticks per 5 s, with `capture` on shared memory ~410. With the `system` (cached) dma-heap it dropped to ~273, but the texture read-back then varied between runs
+   (`gl-readback`: 130 304, 130 240, 129 856 and 111 616 non-zero bytes in four runs; some tests gave 0 or 196 608), so it was not adopted. `system-uncached` stays.
+4. **KWin was leaking dma-buf descriptors, ~126 per second with a client on Zink** (18 143 after 12 minutes idle, +630 per 5 s with `es2gears`, never going down; the limit is 524 288, so about an hour). Cause, from syscall traces and the source:
+   `zink_screen_export_dmabuf_semaphore()` (Mesa 25.0.7, `zink_screen.c:2380`) dups a fd, calls `drmIoctl(DMA_BUF_IOCTL_EXPORT_SYNC_FILE)` and closes the fd only if that succeeds; this kernel has no such ioctl, so it fails with `ENOTTY` every time.
+   Mesa 25.2.0 closes it right after the ioctl (25.2 needs `nullDescriptor`, which Samsung does not offer). `x400/venus/zink-syncfd-leak.c` is an `LD_PRELOAD` shim for KWin (`session-inner.sh`): with it the counter is 3 at start, 9 with `es2gears` and flat for 30 s.
+5. **Stage C, dma-buf frames, checked piece by piece** (`x400/test/`):
+   - KWin hands out linear BGRA dma-bufs to a screencast client that asks for them (`capture-dmabuf-probe.c`): 2112x1320, modifier 0, three buffers of 11 151 360 bytes, stride 8448, no corrupted frames. One `es2gears` on Zink: ~255 ticks per 5 s with that stream, ~410 with memfd, ~200-226 with no consumer.
+   - The Vulkan of Samsung imports a dma-buf as a `VkImage` and the GPU and the CPU see the same bytes both ways (`vk-dmabuf-import.c`). It needs tiling `DRM_FORMAT_MODIFIER` with `DRM_FORMAT_MOD_LINEAR` and an explicit `rowPitch`; plain `VK_IMAGE_TILING_LINEAR` + dma-buf is refused.
+     BGRA has exactly one modifier on this driver (linear); images are importable, not exportable.
+   - Importing it as an `AHardwareBuffer` (`ahb-import.c`) was not conclusive: `createFromHandle` accepts a handle copied from an allocated buffer with its fd swapped, but `lock()` returns the address stored in the handle's ints, not the dma-buf. Not pursued.
+   - A frame reaches the layer through Vulkan (`vk-present.c`, run by the real `x400-display.dex`): `VK_KHR_android_surface` works; the swapchain is RGBA only, so the BGRA frame is blitted; `preTransform` must be IDENTITY; a surface already used with `ANativeWindow_lock` cannot get a swapchain.
+   - **Present mode:** at a fixed producer rate against the 90 Hz panel (11.11 ms), one 8 s run per cell: mailbox kept up with 90, 120 and 180 fps (worst `acquire` 0.3-0.6 ms) while fifo stayed at ~90 and waited 9-12 ms in `vkAcquireNextImage`; CPU per frame was the same.
+     At 30 and 60 fps both cost the same CPU, and the CPU path of before (`ANativeWindow_lock` + `memcpy`) cost 43 % of a core at 60 fps against 27-28 % for Vulkan. Mailbox was chosen because the thread that answers `DONE` to `capture` must not wait for the display.
+     `dumpsys SurfaceFlinger --latency` returned no frames with display times, so there is no display latency number.
+6. **Integrated** (`x400/display/capture.c`, `jni.c`, `fdframe.h`): `capture` asks for linear BGRA dma-bufs and sends the descriptor to the helper over a `SOCK_SEQPACKET` socket; the helper imports each buffer once, blits it and answers `DONE`. Shared memory (and the file) remain as fallbacks, `X400_NOVULKAN=1` / `X400_FIFO=1` / `X400_FRAMES=copy` / `X400_NOFD=1` switch parts off.
+   The owner looked at the panel: orientation and colours right, no cuts or artefacts.
+7. **90 Hz:** KWin's virtual output has one 60 Hz mode (`VirtualOutput::init`); `kscreen-doctor output.1.addCustomMode.2112.1320.90000.full` adds one live and `output.1.mode.<n>` selects it. `session-inner.sh` does it at start (0 retries in a fresh session).
+
+### Numbers (one `es2gears` on Zink as the load, one run each; frames that reach the layer)
+| | fps | `kwin_wayland` ticks (10 s) | helper |
+|---|---|---|---|
+| shared memory, `capture` copies into a file | ~7 | 540-800 (three runs, different loads) | |
+| dma-buf, Vulkan mailbox, 60 Hz mode | 40.8-41.8 | 529 | 126 ticks |
+| dma-buf, Vulkan mailbox, 90 Hz mode | 51.1 | 583 | 155 ticks |
+The helper's `acquire` took 0.14 ms on average (max 0.46-0.99 ms) and `record+submit+present` 1.9 ms. The helper used more CPU than with the memfd path (126-155 against 30-45 ticks per 10 s, same kind of load); not explained.
+The shared-memory row is the weakest: the runs behind it (540, ~620-660 and ~800 ticks per 10 s) were taken with different clients and window sizes, so only the order of magnitude is comparable with the dma-buf rows.
+
+### Open
+- **The ceiling is ~51 fps, not 90.** From the other conversation's measurement (`x400/test/wl-client.c`, a Wayland client with `wl_shm` buffers and no GPU, one run of 10-12 s per mode): the client gets 59.6-59.8 frame callbacks per second in the 60 Hz mode and 70.8-84.8 (mean ~77) in the 90 Hz one,
+  while KWin delivers 51.7-57.7 and 52.2-61.9 frames per second to `capture` (5 replaced in 1080 and in 2160). A consumer that returns each buffer at once gets 41.9 and 54.0. So the limit is neither `capture`'s one-buffer cycle nor the negotiated framerate (max 90/1): it sits in what KWin passes to the screencast.
+  The suspect is the time of one `record()` with Zink on Venus; not measured. `session-inner.sh` can make KWin write its per-frame timing (`KWIN_LOG_PERFORMANCE_DATA`) when `$STAGE/x400/kwin-perf` exists; the result is not in this document.
+- No synchronization with KWin's GPU work (there is no `external_semaphore_fd` in Venus and no sync-file ioctl in the kernel). A check on the shared-memory path (`X400_RACECHECK`: compare a frame when it arrives and 15 ms later) found 0 of 120 frames still changing; **not done on the dma-buf path.**
+- The USB connection to the PC dropped twice with the Linux session up (once during a `simpleperf report` on the tablet); returning with Vol+ and Vol- brought it back. Cause unknown.
+- Long sessions, heat and battery are not measured. More than two simultaneous Zink clients are not tried.
