@@ -57,7 +57,14 @@ PASS SIGHUP exits cleanly        PASS EOF on the device ends the bridge       PA
 ## 3. Not tested (and why)
 - **`guest.sh` end to end** (the reboot cut the test: it was going to run `guest.sh` with both radios off inside `unshare -m`). Run it first when root is back (step 0).
 - Overlay on `/etc` and `/var/lib` themselves; `install`, `pkill`, `mountpoint`, `btattach`, `NetworkManager`, `wpa_supplicant` presence in the guest (`btattach`/NM/wpa come with the packages; the guest has none of them yet).
-- Dependency check of `PACKAGES` with `apt-get install -s` against the rootfs status: started, no result before the reboot (the first round, in RESEARCH.md, was clean: 8 + 46 + 25 new packages, all from the archive). `dbus`, `udev`, `iproute2`, `python3` are in the image.
+- (Done, see below.) `btattach`, `NetworkManager`, `wpa_supplicant` and the guest's `install`/`pkill`/`mountpoint` are still unchecked in the live guest.
+
+## 2b. Dependency check of `PACKAGES` (finished after the reboot, PC only)
+`sudo chroot out/rootfs-plasma apt-get install -s --no-install-recommends wpasupplicant iw rfkill wireless-regdb network-manager plasma-nm bluez bluedevil libspa-0.2-bluetooth`
+-> no `E:` and no unmet dependency: **77 new packages**, all `resolute` arm64/all from the archive (the 8 + 46 + 25 of the first round, with the overlaps counted once). Already in the image, so not pulled:
+`dbus 1.16.2-2ubuntu4`, `dbus-daemon`, `iproute2 6.19.0-1ubuntu1.1`, `mount`/`util-linux 2.41.3-3ubuntu2.2`, `procps 2:4.0.4-9ubuntu1`, `python3 3.14.3-0ubuntu2`, `udev 259.9-0ubuntu0.1`.
+The `Inst` list contains `bluez`, `network-manager`, `wpasupplicant`, `iw`, `rfkill`, `wireless-regdb`, `libspa-0.2-bluetooth`, `bluedevil`, `plasma-nm` and, as dependencies, `libqt6webenginecore6` + `-bin` + `-widgets6` + `-data`, `netplan.io`, `libtss2-*`, `libopenconnect5`, `libxmlsec1-*`, `libnm0`, `libnl-*`, `kmod`, `ethtool`.
+`btattach` ships in `bluez` (`./usr/bin/btattach`), `NetworkManager` in `network-manager` (`./usr/sbin/NetworkManager`), `wpa_supplicant` in `wpasupplicant` (`./usr/sbin/wpa_supplicant`), from the .deb file lists. No change to `PACKAGES` is needed.
 - `mac80211_hwsim` exists on the PC kernel (`modinfo` ok) but I did not load it nor run NM against it (not worth the cost; syntax validated with `--print-config`).
 - Whether Ubuntu's `wpa_supplicant -u` works with `scsc_wlan` (that is W2), and whether `scsc_h4_0` is plain H4 (that is B3).
 
