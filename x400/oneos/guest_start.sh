@@ -89,6 +89,15 @@ case "${X400_SHARE:-rw}" in
             say "One UI's storage: not reachable at $SHR; /mnt/oneui not mounted"
         fi ;;
 esac
+# The way back from the desktop: OneOS's session watcher (oneos_switch.sh) also takes a request as a file, the one its own guest app writes for "Back to One UI",
+# $STAGE/data/user/0/com.fahadali.oneos.guest/files/oneos_return, with the same effect as Volume Up + Volume Down. A guest cannot setprop (that is Android's), but it can
+# write a file: that folder is made here (the watcher only reads a plain file from it, 16 bytes) and bound at /run/x400-return, which x400/shortcuts uses.
+RETD="$STAGE/data/user/0/com.fahadali.oneos.guest/files"
+if mkdir -p "$RETD" "$R/run/x400-return" && $BB mount --bind "$RETD" "$R/run/x400-return"; then
+    chmod 700 "$RETD"; say "way back from the desktop: /run/x400-return/oneos_return"
+else
+    say "WARNING: the folder for the desktop's way-back button could not be made"
+fi
 say "guest filesystems ready: $(grep -c " $R" /proc/mounts) mounts under $R"
 
 # The display. OneOS stopped One UI's surfaceflinger and its watcher keeps init's copy stopped; the desktop's layer needs a

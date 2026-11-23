@@ -85,6 +85,8 @@ fi
 # sensors first: it owns the guest's system bus; radio (NetworkManager, BlueZ) waits for it, and both must be on the bus before plasmashell loads its applets
 grp sensors
 grp radio
+# the desktop's shortcuts (x400/shortcuts): before plasmashell, which reads ~/Desktop and Dolphin's places when it starts
+grp shortcuts
 $L/kglobalacceld > /tmp/kga.log 2>&1 &
 kded6 > /tmp/kded.log 2>&1 &
 sleep 3
