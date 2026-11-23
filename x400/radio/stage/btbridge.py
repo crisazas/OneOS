@@ -43,20 +43,33 @@ def check_node(path):
 
 
 def probe(path, timeout):
+    """Open, send HCI_Reset, read H4 events until the Command Complete of Reset (opcode 0x0c03) or the timeout, close.
+    Controllers announce themselves with a Command Status of opcode 0 first; that is skipped, not an error."""
     fd = os.open(path, os.O_RDWR | os.O_NOCTTY)
     try:
         os.write(fd, RESET)
-        got = b""
+        buf = b""
         end = time.monotonic() + timeout
-        while len(got) < len(RESET_OK) and time.monotonic() < end:
+        ok = False
+        while time.monotonic() < end and not ok:
             r, _, _ = select.select([fd], [], [], max(0.0, end - time.monotonic()))
-            if r:
-                chunk = os.read(fd, 256)
-                if not chunk:
-                    break
-                got += chunk
-        print("reply: " + got.hex())
-        return got.startswith(RESET_OK)
+            if not r:
+                break
+            chunk = os.read(fd, 256)
+            if not chunk:
+                break
+            buf += chunk
+            while len(buf) >= 3 and buf[0] == 0x04 and len(buf) >= 3 + buf[2]:
+                ev = buf[:3 + buf[2]]
+                buf = buf[len(ev):]
+                print("event: " + ev.hex())
+                if ev[1] == 0x0e and ev[3:6] == bytes([0x01, 0x03, 0x0c]):
+                    print("reset complete, status %d" % ev[6])
+                    ok = ev[6] == 0
+            if buf and buf[0] != 0x04:
+                print("unexpected H4 type %02x: %s" % (buf[0], buf.hex()))
+                break
+        return ok
     finally:
         os.close(fd)
 

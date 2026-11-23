@@ -106,10 +106,12 @@ fake = os.ttyname(cs)
 import threading
 def controller():
     if read_until(cm, 4, 4) == RESET:
+        os.write(cm, bytes([0x04, 0x0f, 0x04, 0x00, 0x01, 0x00, 0x00]))
+        time.sleep(0.2)
         os.write(cm, RESET_OK)
 t = threading.Thread(target=controller)
 t.start()
 r = subprocess.run([sys.executable, BRIDGE, "--probe", "--device", fake], capture_output=True, text=True)
 t.join()
-check("--probe sends Reset and sees the Command Complete", r.returncode == 0 and RESET_OK.hex() in r.stdout, r.stdout.strip())
+check("--probe sends Reset and sees the Command Complete", r.returncode == 0 and "reset complete, status 0" in r.stdout and "040f0400010000" in r.stdout, r.stdout.strip().replace(chr(10), " | "))
 sys.exit(1 if failed else 0)

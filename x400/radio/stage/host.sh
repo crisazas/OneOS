@@ -11,7 +11,7 @@ for c in /data/adb/ksu/bin/busybox /data/adb/ap/bin/busybox /data/adb/magisk/bus
 done
 [ -n "$BB" ] || { echo "radio host.sh: no busybox"; exit 1; }
 umask 077
-rm -rf "$OUT"; mkdir -p "$OUT" && chmod 700 "$OUT" || { echo "radio host.sh: cannot create $OUT"; exit 1; }
+mkdir -p "$OUT"; rm -f "$OUT"/*.nmconnection "$OUT"/ready "$OUT"/bt_addr "$OUT"/.records; mkdir -p "$OUT" && chmod 700 "$OUT" || { echo "radio host.sh: cannot create $OUT"; exit 1; }
 n=0
 SEP=$(printf '\001')
 if [ -r "$STORE" ]; then
@@ -82,5 +82,6 @@ if [ -r "$STORE" ]; then
 else
     echo "radio host.sh: $STORE not readable"
 fi
+[ -r /mnt/vendor/efs/bluetooth/bt_addr ] && { cp /mnt/vendor/efs/bluetooth/bt_addr "$OUT/bt_addr" && chmod 600 "$OUT/bt_addr" && echo "radio host.sh: Bluetooth address copied"; }
 echo "radio host.sh: $n connection(s) in $OUT"
 : > "$OUT/ready"

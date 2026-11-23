@@ -1,102 +1,170 @@
-# x400/radio (G4) RESULT: implementation prepared, nothing risky run
+# x400/radio (G4) RESULT: Wi-Fi and Bluetooth work in the integrated session
 
-**Stopped early, on purpose.** At ~06:23 the tablet rebooted by itself while I was only pushing files (`adb` dropped, came back with `uptime 2 min`,
-`su: inaccessible or not found`, `kwin_wayland` gone). Root (DFroot) is lost until KernelSU is restored over adb; CTX.md says to report and stop, so I did not touch the device again.
-I do not know what caused the reboot (no radio, rfkill, `/dev/scsc_h4_0`, `/dev/ttySAC*` or Android service was touched by me in this round; the only mounts I made were an overlay and a tmpfs scratch test
-in the guest earlier, both unmounted). The last thing running on the PC side was `apt-get install -s` in the chroot (no relation to the tablet).
-Consequence: `guest.sh` was written and syntax-checked but **not run end to end**; see "Not tested".
+Measured on the live session (started 07:05, root recovered, kernel 5.15, One UI stopped), 2026-11-23 07:10-07:23 (the guest's `date` is UTC-6 behind the log's 13:xx; both appear below).
+Nothing was restarted: `kwin_wayland` 26791, `x400vt` 25771 and `capture` 32460 had the same pids at the end. No oops, no reboot, no `wlbt`/`scsc` error in `dmesg` during any step.
 
-## 1. What is prepared (`x400/radio/stage/`, nothing there holds a secret)
-| File | Job |
-|---|---|
-| `btbridge.py` | H4 relay `/dev/scsc_h4_0` <-> pty. Does not open the node until `SIGUSR1` (or `--open-now`); `SIGUSR2` closes it, `SIGTERM`/`SIGHUP`/`SIGINT`/EOF end it cleanly and remove the pty file. `--dry-run` only `stat`s the node. `--probe` = step B3 (opens, sends `HCI_Reset`, prints the reply, closes). `--trace FILE` logs both directions in hex. |
-| `host.sh` | Android side, root, background. Reads `/data/misc/apexdata/com.android.wifi/WifiConfigStore.xml` and writes one `x400-android-N.nmconnection` (mode 600) per saved network (WPA-PSK, SAE, open) into `/data/local/tmp/oneos/rootfs/run/x400-radio/` (dir 700) = the guest's `/run/x400-radio`, a **tmpfs** made by `guest_start.sh` before host.sh runs. Never prints a key; skips hex SSIDs, unsupported types and keys <8 chars. `ready` marks the end. |
-| `guest.sh` | Guest side. `guest.sh` prepares writable places; with `enable-wifi` / `enable-bt` it starts that radio; `guest.sh stop` ends what it started (by pid file, never by name). |
-| `conf/NetworkManager.conf` | `plugins=keyfile`, `unmanaged-devices=except:interface-name:wlan0`, `wifi.backend=wpa_supplicant`, `auth-polkit=false`, `dns=default`, `rc-manager=symlink`, `ipv4/ipv6.route-table=1014`. |
-| `conf/bluetooth-main.conf` | `Privacy=off`, `JustWorksRepairing=never`, `GATT Cache=no` (no `AF_ALG` in this kernel). BlueZ state is `/var/lib/bluetooth` (overlay, RAM). |
-| `.gitignore` | `*.nmconnection`, `bt_addr`, `ready`, `enable-*`. |
-| `../test-btbridge.py` | the dry test below. |
+## 1. Result in one table
+| Piece | State | Proof (section) |
+|---|---|---|
+| Wi-Fi: NetworkManager + Ubuntu wpa_supplicant on `wlan0`, saved network from One UI | **works** | 3 |
+| Real connectivity from the guest (ICMP, DNS, HTTPS, NM `full`) | **works** | 3.4 |
+| Bluetooth controller (`hci0`, BD address of One UI, Powered, scan) | **works** | 4 |
+| Bluetooth pairing and A2DP audio | **not tried** | 6 |
+| Clean stop (`guest.sh stop`), `scsc_h4_0` released | **works** | 5 |
+| Both radios on at every session start | done through the flag files in `stage/` | 7 |
+| plasma-nm and bluedevil in the tray | **work after plasmashell restarts once**; they do not at session start (see 8) | 8 |
 
-Network table number (measured before the reboot): `cat /data/misc/net/rt_tables` -> `1014 wlan0`, `1000000014 wlan0_local`. Rules: `31000: from all fwmark 0x0/0xffff iif lo lookup wlan0` and
-`32000: unreachable`; netd already had `default via 192.168.68.1 dev wlan0` in table 1014. So no extra `ip rule` is needed: NM only has to put its routes in table 1014 (`route-table=1014`, in the conf and in each generated keyfile).
+## 2. What was prepared and changed in this round (`x400/radio/stage/`)
+`btbridge.py`, `host.sh`, `guest.sh`, `conf/NetworkManager.conf`, `conf/bluetooth-main.conf`, `enable-wifi`, `enable-bt`, `.gitignore`; `test-btbridge.py` next to it.
+Changes made while running the risky phase (each one came from a measured failure):
+- `btbridge.py --probe`: the controller sends a **Command Status** `04 0f 04 00 01 00 00` (opcode 0) before the Reset's Command Complete. The first probe read only 7 bytes, got that status and returned rc=1 although the controller was fine. It now reads H4 events until the Command Complete of opcode `0c03` (and the test in `test-btbridge.py` sends the status first, 16/16 PASS in the guest).
+- `host.sh` also copies `/mnt/vendor/efs/bluetooth/bt_addr` to `/run/x400-radio/bt_addr` (the guest does not see `/mnt/vendor`); `guest.sh` writes it to the `scsc_bt` parameter (B4). `host.sh` keeps `pid` and flag files in the output dir (no `rm -rf`).
+- `guest.sh` does not start a second wpa_supplicant/NetworkManager/bridge if its pid files are alive (a second run during B5 launched a second wpa_supplicant: `dbus: Could not request service name: already registered`, which dropped the association for ~2 min until `nmcli connection up` re-attached it).
+- `conf/NetworkManager.conf`: `[connectivity]` with `nmcheck.gnome.org` (see 3.5).
+- `host.sh` runs in the guest's mount namespace: `$R/run` is a tmpfs there; from the plain Android namespace it fails with `Read-only file system`. Run it with `nsenter -t $(pidof kwin_wayland) -m` (that is how `guest_start.sh` runs it).
 
-### Flag files (both radios start OFF)
-`enable-wifi` / `enable-bt` are looked for in `/tmp/x400/radio/` (the bound stage: G0 or host.sh can create them under `/data/local/tmp/oneos/x400/groups/radio/`) and in `/run/x400-radio/` (by hand in the guest).
-A `deploy.sh` run replaces the stage, so flags in it are wiped on the next deploy.
-
-### Writable places (the list G0 asked for)
-Nothing needs to be mounted by `guest_start.sh`. `guest.sh` does, inside the guest's own mount namespace: `mount -t overlay overlay -o lowerdir=/etc,upperdir=/run/x400-radio/ov/etc/up,workdir=...` on **`/etc`** and on **`/var/lib`**
-(upper layers in the guest's `/run` tmpfs, so RAM only; pairings and NM state vanish with the session), `mkdir -p` of `/etc/NetworkManager/system-connections` (700), `/var/lib/NetworkManager`, `/var/lib/bluetooth` (700),
-`/run/NetworkManager`, `/run/wpa_supplicant`, `/run/dbus`, `/run/udev/data`, and `ln -s /run/NetworkManager/resolv.conf /etc/resolv.conf`. `/var/run` is already a symlink to `/run` in the image.
-If the overlay on `/etc` fails, the log line `overlay on /etc failed` is in `/tmp/x400-radio.log` and NM cannot write its keyfiles.
-
-### Order in `guest.sh`
-1. writable places (above) 2. `wait_bus`: waits up to 10 s for `/run/dbus/system_bus_socket` (**G2's guest.sh creates it with `x400/sensors/system-bus.conf`; this script never creates a second bus**;
-only if it is still absent after 10 s it starts one with G2's own config, so the bus is the same kind) 3. Wi-Fi if `enable-wifi`: udev database entry for wlan0, copy the keyfiles, `wpa_supplicant -u -O /run/wpa_supplicant`, `NetworkManager --no-daemon`
-4. BT if `enable-bt`: `btbridge.py`, `SIGUSR1`, `btattach -B <pty> -P h4`, `bluetoothd -n -f /run/x400-bluetooth-main.conf`.
-**No `systemd-udevd`**: `udev` is in the image, but NM only needs the database entry, so `guest.sh` writes `/run/udev/data/n<ifindex>` itself (tested below) and nothing touches `/dev`, which is shared with Android.
-
-## 2. Dry-run evidence
-**Relay (`python3 x400/radio/test-btbridge.py`, run in the live guest, python 3.14.4, a pty stands in for `/dev/scsc_h4_0`; `/dev/pts` is not mounted on the PC):** 16 of 16 PASS
+## 3. Wi-Fi (steps 0, W2, W3, W4)
+### 3.1 Step 0: image, stage, overlays, keyfile
 ```
-PASS dry-run reports the node /dev/pts/0 exists, mode 620, rdev 136:0; not opened
-PASS dry-run fails on a missing node          PASS pty file written /dev/pts/1       PASS node NOT opened before the order
-PASS node opened after SIGUSR1                PASS HCI Reset reaches the controller side 01030c00
-PASS answer comes back to the host side 040e0401030c00     PASS trace has both directions     PASS 10 KB host->controller intact 10240 bytes
-PASS node closed after SIGUSR2   PASS node reopened on demand   PASS SIGTERM exits cleanly (0)   PASS pty file removed
-PASS SIGHUP exits cleanly        PASS EOF on the device ends the bridge       PASS --probe sends Reset and sees the Command Complete reply: 040e0401030c00
+$ ls /usr/sbin/NetworkManager /usr/sbin/wpa_supplicant /usr/bin/btattach /usr/libexec/bluetooth/bluetoothd /usr/bin/nmcli    (all present; curl is NOT in the image)
+$ cat /tmp/x400-radio.log          13:05:46 radio: both radios off: only the writable places are ready
+$ mount | grep -E ' /(etc|var/lib) '
+overlay on /etc type overlay (rw,relatime,seclabel,lowerdir=/etc,upperdir=/run/x400-radio/ov/etc/up,workdir=/run/x400-radio/ov/etc/work)
+overlay on /var/lib type overlay (rw,relatime,seclabel,lowerdir=/var/lib,upperdir=/run/x400-radio/ov/var/lib/up,workdir=/run/x400-radio/ov/var/lib/work)
+$ ls -l /run/x400-radio/*.nmconnection     -rw-------+ 1 root root 304 Nov 23 13:05 /run/x400-radio/x400-android-1.nmconnection
+$ sed (psk redacted) /run/x400-radio/x400-android-1.nmconnection
+[connection] id=Internet uuid=c8205c76-... type=wifi interface-name=wlan0 autoconnect=true autoconnect-priority=10
+[wifi] mode=infrastructure ssid=Internet     [wifi-security] key-mgmt=wpa-psk psk=<REDACTED len=15>
+[ipv4] method=auto route-table=1014          [ipv6] method=auto route-table=1014
 ```
-**`host.sh` with a fake store (Android shell, `X400_RADIO_STORE`/`X400_RADIO_OUT` overrides):** three fake networks (WPA-PSK+SAE with `&amp;`, `&quot;`, `\`, `<>` in SSID/key; open; 3-char key) gave 2 keyfiles
-(`rw-------`, dir `drwx------`) and `key too short for one network`; a key containing a backslash comes out escaped as `\\` (checked with `od -c` after fixing an `echo` that reduced it). The real store was **not** read in this round
-(it has 1 network, `Internet`, WPA_PSK + auto-upgraded SAE; the key was never printed).
-**NetworkManager config:** `NetworkManager --print-config --config=stage/conf/NetworkManager.conf --config-dir=/nonexistent` (PC build 1.46) accepts the file and shows `unmanaged-devices=except:interface-name:wlan0`,
-`wifi.backend=wpa_supplicant`, `auth-polkit=false`, `ipv4.route-table=1014`. The image's NM is 1.54.3; same keys, not run.
-**wlan0 "initialized" without udevd (live guest, then restored):** `pyudev` `is_initialized` was `False`; after `printf 'I:...\nE:INTERFACE=wlan0\nG:x400\n' > /run/udev/data/n14` it was `True`; after removing it, `False` again; `/run` back to `dbus mount user`.
-**Mounts in the guest namespace:** `mount -t overlay ... lowerdir=/usr/share/doc,upperdir=/tmp/ovt/up,...` mounted, wrote `NEWFILE` only to the upper dir, unmounted; `mount -t tmpfs` also works. (The overlay on `/etc` and `/var/lib` themselves was not tried.)
+Before: `iw dev wlan0 link` -> `Not connected.`; `getprop init.svc.wpa_supplicant` -> `stopped`; `wlan0` only had the stale lease `192.168.68.109/22`.
+The `.nmconnection` really comes from One UI's `WifiConfigStore.xml` (`Internet`, WPA_PSK; the key was never printed or stored in git; the file lives in the guest's `/run`, tmpfs, mode 600).
 
-## 3. Not tested (and why)
-- **`guest.sh` end to end** (the reboot cut the test: it was going to run `guest.sh` with both radios off inside `unshare -m`). Run it first when root is back (step 0).
-- Overlay on `/etc` and `/var/lib` themselves; `install`, `pkill`, `mountpoint`, `btattach`, `NetworkManager`, `wpa_supplicant` presence in the guest (`btattach`/NM/wpa come with the packages; the guest has none of them yet).
-- (Done, see below.) `btattach`, `NetworkManager`, `wpa_supplicant` and the guest's `install`/`pkill`/`mountpoint` are still unchecked in the live guest.
+### 3.2 W2/W3: first start (`touch /run/x400-radio/enable-wifi; sh /tmp/x400/radio/guest.sh`)
+```
+13:10:34 radio: wifi: enabled
+13:10:35 radio: wifi: wpa_supplicant 12349, NetworkManager 12610
+$ tail /tmp/wpa_supplicant.log
+Successfully initialized wpa_supplicant
+wlan0: Trying to associate with SSID 'Internet'
+wlan0: Associated with 32:16:9d:76:48:db
+wlan0: WPA: Key negotiation completed with 32:16:9d:76:48:db [PTK=CCMP GTK=CCMP]
+wlan0: CTRL-EVENT-CONNECTED - Connection to 32:16:9d:76:48:db completed [id=0 id_str=]
+```
+So Ubuntu's wpa_supplicant 2.11 (`-u`, nl80211) works with `scsc_wlan`: the vendor binary fallback was not needed. `dmesg` showed no `slsi_`/`wlbt` error.
 
-## 2b. Dependency check of `PACKAGES` (finished after the reboot, PC only)
-`sudo chroot out/rootfs-plasma apt-get install -s --no-install-recommends wpasupplicant iw rfkill wireless-regdb network-manager plasma-nm bluez bluedevil libspa-0.2-bluetooth`
--> no `E:` and no unmet dependency: **77 new packages**, all `resolute` arm64/all from the archive (the 8 + 46 + 25 of the first round, with the overlaps counted once). Already in the image, so not pulled:
-`dbus 1.16.2-2ubuntu4`, `dbus-daemon`, `iproute2 6.19.0-1ubuntu1.1`, `mount`/`util-linux 2.41.3-3ubuntu2.2`, `procps 2:4.0.4-9ubuntu1`, `python3 3.14.3-0ubuntu2`, `udev 259.9-0ubuntu0.1`.
-The `Inst` list contains `bluez`, `network-manager`, `wpasupplicant`, `iw`, `rfkill`, `wireless-regdb`, `libspa-0.2-bluetooth`, `bluedevil`, `plasma-nm` and, as dependencies, `libqt6webenginecore6` + `-bin` + `-widgets6` + `-data`, `netplan.io`, `libtss2-*`, `libopenconnect5`, `libxmlsec1-*`, `libnm0`, `libnl-*`, `kmod`, `ethtool`.
-`btattach` ships in `bluez` (`./usr/bin/btattach`), `NetworkManager` in `network-manager` (`./usr/sbin/NetworkManager`), `wpa_supplicant` in `wpasupplicant` (`./usr/sbin/wpa_supplicant`), from the .deb file lists. No change to `PACKAGES` is needed.
-- `mac80211_hwsim` exists on the PC kernel (`modinfo` ok) but I did not load it nor run NM against it (not worth the cost; syntax validated with `--print-config`).
-- Whether Ubuntu's `wpa_supplicant -u` works with `scsc_wlan` (that is W2), and whether `scsc_h4_0` is plain H4 (that is B3).
+### 3.3 NetworkManager manages only wlan0, route and DNS
+```
+$ nmcli -t -f DEVICE,TYPE,STATE,CONNECTION device
+wlan0:wifi:connected:Internet        dummy0, ifb*, tunl0, gre*, sit0, lo, umts_*, p2p0, swlan0, wifi-aware0, wlan2, wlan3, p2p-dev-wlan0: all "unmanaged"
+$ iw dev wlan0 link          Connected to <bssid> (on wlan0)  SSID: Internet  freq: 5220.0  signal: -33 dBm  rx bitrate: 6.0 MBit/s  tx bitrate: 866.6 MBit/s
+$ ip -o addr show wlan0      inet 192.168.68.109/22 brd 192.168.71.255 scope global dynamic noprefixroute wlan0
+$ ip route show table 1014   default via 192.168.68.1 dev wlan0 proto dhcp src 192.168.68.109 metric 600
+                             192.168.68.0/22 dev wlan0 proto kernel scope link src 192.168.68.109 metric 600
+$ ip rule | grep -E '^(31000|32000)'     31000: from all fwmark 0x0/0xffff iif lo lookup wlan0    32000: from all unreachable
+$ ip route get 8.8.8.8       8.8.8.8 via 192.168.68.1 dev wlan0 table wlan0 src 192.168.68.109 uid 0
+$ ls -la /etc/resolv.conf    /etc/resolv.conf -> /run/NetworkManager/resolv.conf    (nameserver 192.168.1.254, 192.168.68.1)
+```
+`route-table=1014` was the right number (`wlan0` in `/data/misc/net/rt_tables`); no `ip rule` had to be added. The udev entry trick (`/run/udev/data/n14`) was enough: `wlan0` is `connected`, never `unmanaged`.
 
-## 4. The risky phase, in order (run only on the integrated session, root restored)
-Abort rule for all: first non-success -> stop, run `guest.sh stop`, do not retry in a loop, note `dmesg | tail -50`. USB adb survives a radio accident.
-| # | Command | Success | Abort / risk |
-|---|---|---|---|
-| 0 | `adb shell su -c 'sh /data/local/tmp/oneos/x400/groups/radio/host.sh'` then in the guest `sh /tmp/x400/radio/guest.sh; cat /tmp/x400-radio.log` (no flags) | log `both radios off`; `ls /run/x400-radio` shows the keyfile; `mount \| grep -E ' /etc \| /var/lib '` shows two overlays; `touch /etc/NetworkManager/system-connections/p` works | overlay fails -> NM cannot run; fix before going on. No radio risk. |
-| 1 | `python3 /tmp/x400/radio/btbridge.py --dry-run` | `/dev/scsc_h4_0 exists ...; not opened` | node missing -> stop BT |
-| 2 | Before W2: `getprop init.svc.vendor.bluetooth-1-1` = running, `lshal \| grep IBluetoothHci` shows `0/1`, `dmesg \| grep -c -i wlbt`; note `/sys/module/scsc_bt/parameters/service_start_count` | baselines recorded | a holder of `scsc_h4_0` or a WLBT error already present -> stop |
-| W2 | `touch /run/x400-radio/enable-wifi; sh /tmp/x400/radio/guest.sh; nmcli device; nmcli device wifi list` | `wlan0 disconnected` (not `unmanaged`), scan results appear, no new `slsi_`/`wlbt` errors | `unmanaged` -> udev entry (see 2); `vif`/firmware errors or `iw dev wlan0 scan` hangs -> `guest.sh stop`. Medium: WLBT firmware wedge = Wi-Fi and BT down until reboot. |
-| W3 | `nmcli connection up x400-android-1; ip route get 1.1.1.1; ping -c3 1.1.1.1; ping -c3 ubuntu.com` | route via table 1014, replies, DNS works | no ping while `iw dev wlan0 link` is `Connected` -> table problem: `ip rule`, `ip route show table 1014`. Medium. |
-| W4 | plasma-nm applet shows the network | | low |
-| B3 | `python3 /tmp/x400/radio/btbridge.py --probe` (Wi-Fi may stay up; it shares the chip, prefer it off) | `reply: 040e0401030c00...` rc 0 | rc 1, `open` error, or hang >5 s -> stop BT, **do not** run B5. High: first open of `scsc_h4_0`; a firmware assert resets WLBT. |
-| B4 | compare `/mnt/vendor/efs/bluetooth/bt_addr` with `hciconfig hci0` address; if needed write the efs address into `/sys/module/scsc_bt/parameters/bluetooth_address` **before** B5 | address matches | malformed value -> do not write. Low-medium (not automated here on purpose). |
-| B5 | `touch /run/x400-radio/enable-bt; sh /tmp/x400/radio/guest.sh; hciconfig -a; bluetoothctl power on; bluetoothctl scan on` | `hci0` UP, devices listed, a keyboard/speaker pairs | `btattach` exits, `hci0` absent, `Failed to open crypto` in `/tmp/bluetoothd.log` -> `Privacy` must stay off; if `hci0` hangs, `guest.sh stop`. Medium. |
-| B6 | Before returning to One UI: `sh /tmp/x400/radio/guest.sh stop`; `grep scsc_h4 /proc/*/fd` finds nothing | no holder | **forgetting it leaves Bluetooth dead in One UI until reboot.** |
+### 3.4 Real connectivity from the guest
+```
+$ ping -c3 8.8.8.8      64 bytes from 8.8.8.8: icmp_seq=1 ttl=117 time=43.1 ms ... 3 packets transmitted, 3 received, 0% packet loss, rtt avg 42.507 ms
+$ getent hosts example.com       2606:4700:10::6814:179a example.com / 2606:4700:10::ac42:93f3 example.com
+$ python3 urllib https://example.com       HTTP 200 OK | server: cloudflare | bytes: 577        (no curl in the image)
+$ busctl --system get-property org.freedesktop.NetworkManager /org/freedesktop/NetworkManager org.freedesktop.NetworkManager State    u 50 (connected global)
+```
+### 3.5 Connectivity "limited" fixed
+After plasma-nm appeared, its Wi-Fi icon had an orange mark: NM's `Connectivity` was `3` (limited) because Ubuntu's default check URL (`http://connectivity-check.ubuntu.com/`) answers 204 but NM expects the 200 body (`ConnectivityCheckEnabled false`, `Uri ""` in this build/config). `conf/NetworkManager.conf` now has
+```
+[connectivity] enabled=true uri=http://nmcheck.gnome.org/check_network_status.txt response=NetworkManager is online interval=300
+```
+```
+$ nmcli general reload conf; busctl ... CheckConnectivity     u 4        $ nmcli -t -f STATE,CONNECTIVITY general     connected:full
+```
+(the orange pixels in the tray icon were gone in the next screenshot: 10 orange pixels before, 0 after, 13:21.)
 
-## 5. Lines for G0
-- `session-inner.sh`: after G2's `guest.sh`, `sh /tmp/x400/radio/guest.sh >/tmp/x400-radio.out 2>&1 &` (both radios stay off with no flag). Its return path (`x400_return.sh`/before One UI starts) must run `sh /tmp/x400/radio/guest.sh stop`.
-- `guest_start.sh` needs **nothing new** for radio: `stage/` is already bound at `/tmp/x400/radio` and `host.sh` already starts in the background after `$R/run` is mounted (checked in the file). The key output goes to `$R/run/x400-radio` (tmpfs, 700); do not move the host.sh launch before the `/run` mount.
-- PACKAGES unchanged (`x400/radio/PACKAGES`). The image does not need `systemd-udevd` work, `/etc/NetworkManager` or `/var/lib/bluetooth` (the packages create them; the overlay makes them writable).
-- G2 contract: G4 waits for `/run/dbus/system_bus_socket` for 10 s and never starts a second bus unless it never appears (then it uses `/tmp/x400/sensors/system-bus.conf`).
+### 3.6 W4 (plasma-nm sees the connection)
+`busctl --system` shows `org.freedesktop.NetworkManager` (pid 12610) and `fi.w1.wpa_supplicant1` (pid 12349); `busctl --user list | grep plasmanetworkmanagement` -> `org.kde.plasmanetworkmanagement 27323 kded6`; the tray shows the Wi-Fi icon (see 8).
 
-## 6. Note for G0: `oneos_btaudio` floods `servicemanager`
-`/data/local/tmp/oneos/oneos_btaudio.log` (pid 7991, started 04:37 with the session): `android.hardware.bluetooth.audio.IBluetoothAudioProviderFactory/default registered again (round 5400): exception 0`, one round per second;
-`dmesg` gets `servicemanager: Service '...IBluetoothAudioProviderFactory/default' originally registered from PID 7991 but it is being registered again from PID 7991. Bad state?...` every second (1634 `dmesg` lines at 06:11).
-Measured at 06:11: process `S` (sleeping), 3 threads, `VmRSS` 2608 kB, utime/stime 117/214 ticks after ~90 min: negligible CPU/memory; the registration returns `exception 0` (accepted). It does not touch `scsc_h4_0`
-(no process holds it). **Not dangerous for the session, but harmful for diagnosis:** it pushes older kernel messages out of the `dmesg` ring, and the risky phase relies on `dmesg` for `wlbt`/`scsc` errors.
-Suggest G0 (owner of `oneos_btaudio`): register once and wait (or lower the rate), or at least take a `dmesg` snapshot before each risky step. I did not touch it.
-Also seen: the load average was ~16 at 06:11 and 15 right after the reboot; I did not find the source (not G4).
+## 4. Bluetooth (B1-B5)
+```
+$ python3 /tmp/x400/radio/btbridge.py --dry-run          /dev/scsc_h4_0 exists, mode 660, rdev 497:0; not opened
+baselines: init.svc.vendor.bluetooth-1-1 running; lshal: android.hardware.bluetooth@1.0::IBluetoothHci/default 0/1 (pid 900); service_start_count=1; no holder of scsc_h4_0
+```
+**B3 (first opening of `/dev/scsc_h4_0`)**, 07:12:11, first with the old probe, then with the fixed one:
+```
+reply: 040f0400010000          rc=1   (old probe: it stopped after the Command Status)   start_count 1 -> 2
+event: 040f0400010000
+event: 040e0401030c00
+reset complete, status 0       rc=0                                                      start_count 2 -> 3, holders after: none, dmesg: nothing new, Wi-Fi ping still 0% loss
+```
+So `scsc_h4_0` carries plain H4 HCI, can be opened by us while Android's HAL idles (`0/1`), and the firmware answers.
+**B4 (BD address)** (`Read BD_ADDR` = `01 09 10 00` through a throw-away open, then closed):
+```
+before:  param bluetooth_address=0, controller answered BD_ADDR A5:F0:F0:13:0F:2E (= bluetooth_address_fallback)
+efs:     /mnt/vendor/efs/bluetooth/bt_addr = 24:A4:52:12:2C:F7
+$ echo 0x24a452122cf7 > /sys/module/scsc_bt/parameters/bluetooth_address ; cat it   40288170159351  (= 0x24a452122cf7 as a decimal integer)
+after:   BD_ADDR 24:A4:52:12:2C:F7
+```
+The parameter is read at the controller's service start (each open that starts the service): the address changed with the very next open, no reboot.
+**B5 (`touch /run/x400-radio/enable-bt`, `guest.sh`)**:
+```
+13:14:31 radio: bt: enabled     13:14:32 radio: bt: bridge 15211 on /dev/pts/0, btattach 15482, bluetoothd 15490
+$ hciconfig -a   hci0: Type: Primary  Bus: UART   BD Address: 24:A4:52:12:2C:F7  ACL MTU: 1021:20  SCO MTU: 0:0  UP RUNNING
+                 Name: 'Galaxy Tab Linux'  HCI Version: 5.3 (0xc)  Revision: 0x2e7c   Features: 0xbf 0xfe 0x8f 0xfe 0xdb 0xff 0x5b 0x87
+$ bluetoothctl show      Controller 24:A4:52:12:2C:F7 (public)  Manufacturer: 0x0075 (117)  Version: 0x0c (12)  Powered: yes  PowerState: on  Pairable: no
+                         UUID: Audio Sink / Audio Source / A/V Remote Control (Target) / Handsfree Audio Gateway / GATT / PnP / Device Information
+$ bluetoothctl --timeout 15 scan on    12 devices in 15 s (MACs hidden here), among them: console-HP-Laptop-15-dy2xxx, [LG] webOS PJTR HU710PB, GoogleTV2762, TVPlayer, CAR-KIT, S503_353506, S534_ee988d
+$ hciconfig hci0        RX bytes:15862 acl:0 sco:0 events:339 errors:0      TX bytes:3600 acl:0 sco:0 commands:74 errors:0
+holder of scsc_h4_0: only pid 15211 (python3 btbridge.py)
+```
+`Privacy=off` kept bluetoothd from needing AF_ALG: `/tmp/bluetoothd.log` has no `Failed to open crypto`. It registered the A2DP endpoints (sbc, aptx_ll, faststream, opus_05, ...) from PipeWire's bluez5 plugin.
 
-## 7. State left on the tablet
-`/data/local/tmp/g4/` (`iw`, `rfkill`, libnl), `/data/local/tmp/g4t/` (copies of stage files, a fake store `fake.xml`, a fake output dir `out/` with a fake key `pa$$w0rd...`; **delete**), probe scripts `/data/local/tmp/g4*.sh`.
-Nothing of mine is mounted (the guest is gone with the reboot). Root must be restored through KernelSU over adb before any further work.
+## 5. Clean stop and Android's side
+```
+$ sh /tmp/x400/radio/guest.sh stop        rc=0     (log: 13:16:47 radio: stop)
+procs left (NetworkManager|wpa_supplicant|btbridge|btattach|bluetoothd): none        holders of scsc_h4_0: none        /sys/class/bluetooth: empty
+$ tail /tmp/btbridge.log        btbridge: opened /dev/scsc_h4_0 / btbridge: closed /dev/scsc_h4_0
+$ python3 btbridge.py --probe (a new open right after stop)   event: 040e0401030c00  reset complete, status 0  rc=0   (service_start_count=6)
+$ getprop init.svc.vendor.bluetooth-1-1   running      dmesg: no new line with wlbt/scsc
+```
+What this proves: after `stop`, nothing of ours holds `scsc_h4_0`, and the node can be opened again (by my probe, the same way Android's `libbt-vendor` does: `open("/dev/scsc_h4_0")`). What it does **not** prove: that One UI's framework Bluetooth service initializes the HAL, since the framework is not running here; that needs a real return to One UI.
+`stop` also did `ip addr flush dev wlan0` and left `wlan0` `down`; One UI's supplicant will take it back on return (not tested, the session is still up).
+Second start from zero, same session (`guest.sh stop`, flag files removed from `/run`, then `guest.sh` with only the stage's flags, 13:22:23): `wpa_supplicant 3531`, `NetworkManager 3733`, `bridge 3761 on /dev/pts/0, btattach 4024, bluetoothd 4032`; `wlan0:connected:Internet`, `connected:full`, `ping 8.8.8.8 rtt avg 39.780 ms`, `getent hosts example.com`, `HTTPS 200`, `hci0 ... UP RUNNING`, `Controller 24:A4:52:12:2C:F7 ... Powered: yes`.
+
+## 6. Not done / not proven
+- Pairing a device and A2DP audio through PipeWire (only discovery was tried). HFP/SCO (calls, microphone) is not expected to work (SCO MTU 0:0).
+- Return to One UI with the radios up (the framework's own Wi-Fi/Bluetooth restart after `guest.sh stop`); run `guest.sh stop` first (G0's return path).
+- `bluetoothctl scan` found 12 devices; no other BLE/BR device types were tried. LE with `Privacy=off` only.
+- Reboot-time behavior: the flags are in the stage, so a new session starts both radios; this was shown by a manual `guest.sh` run with the stage flags, not by restarting the session.
+- NM/BlueZ state is RAM only (overlay on `/etc` and `/var/lib`): pairings and manually added networks vanish with the session. Only the One UI network is regenerated from `WifiConfigStore.xml` at each start.
+
+## 7. Persistent flags
+`x400/radio/stage/enable-wifi` and `x400/radio/stage/enable-bt` (empty files, committed). `deploy.sh` pushes `stage/` to `/data/local/tmp/oneos/x400/groups/radio/`, `guest_start.sh` binds it at `/tmp/x400/radio`, and `guest.sh` looks for `enable-*` there (and in `/run/x400-radio/`). To turn one off: delete the file from the stage (or `rm` it on the tablet in `/data/local/tmp/oneos/x400/groups/radio/`). `session-inner.sh` already runs `grp radio` after inputd.
+
+## 8. plasma-nm and bluedevil in the tray
+At session start `plasmashell` (pid 28529) loaded before the system bus had NetworkManager/BlueZ names: its tray showed only a red-crossed network icon (screenshot 13:18, 8 red pixels at (1943,1300)) and no Bluetooth item; `plasmashell` had `libplasmanm_internalplugin.so` mapped but not `libKF6BluezQt`/`libbluedevilcomponents`.
+Restart done inside the guest, without touching KWin/x400vt/capture (pids identical afterwards):
+```
+$ kill -TERM 28529; (environment taken from /proc/28529/environ) setsid nohup plasmashell > /tmp/plasma2.log   -> pid 21977
+maps now:  libKF6BluezQt.so.6.24.0, libbluedevilcomponents.so, org.kde.plasma.networkmanagement.so, libplasmanm_internalplugin.so
+screenshot 13:19: tray shows a Bluetooth icon and a Wi-Fi icon (red-cross pixels 8 -> 0)
+```
+`kded6` (pid 27323, `org.kde.plasmanetworkmanagement`) was not restarted. **Order for G0:** in `session-inner.sh`, `grp radio` must run, and NetworkManager/BlueZ must be on the system bus, **before** `plasmashell` starts, or the applets are missing until plasmashell is restarted. Simple options: (a) start `plasmashell` after `grp radio` and a short wait (in the 13:22:23 start the radios logged `wifi: wpa_supplicant` after 1 s and `bt: bridge` after 2 s; the tray was not timed), or (b) after `grp radio`, `sleep 12; kill plasmashell; plasmashell &`. I did not change `session-inner.sh` (G0's file). The systray list in `plasma-org.kde.plasma.desktop-appletsrc` (`extraItems`) has no network/bluetooth entries and did not need any: the applets are shown by their kded/StatusNotifier registration.
+
+## 9. Lines for G0
+- `session-inner.sh`: move `grp radio` before `plasmashell` (or restart plasmashell once after it, see 8). `grp radio` already uses `/tmp/x400/radio/guest.sh`; it needs G2's `grp sensors` first for the system bus (it waits 10 s; started after sensors it is fine, started before it would create the bus itself with G2's config).
+- Return path (`x400_return.sh` / before One UI starts): `sh /tmp/x400/radio/guest.sh stop`.
+- Nothing else in `guest_start.sh`. `host.sh` must still be launched after `$R/run` is mounted and inside the session's mount namespace.
+- `PACKAGES`: add `curl` to the image if you want `curl` for diagnostics (the image has none; python3 urllib was used).
+
+## 10. `oneos_btaudio` (unchanged, for G0)
+In the session before this one (pid 7991, started 04:37) `/data/local/tmp/oneos/oneos_btaudio.log` said `android.hardware.bluetooth.audio.IBluetoothAudioProviderFactory/default registered again (round 5400): exception 0`, once per second, and `dmesg` got
+`servicemanager: Service '...' originally registered from PID 7991 but it is being registered again` every second; at 06:11 it was sleeping, 3 threads, `VmRSS 2608 kB`, 117/214 ticks of utime/stime after ~90 min.
+In the current session (started 07:05) it is a new process, pid 21530, 13/33 ticks of utime/stime at uptime 3682 s (I did not re-measure its log rate). It does not touch `scsc_h4_0`; all the radio steps ran fine next to it.
+**Not dangerous for the session**, but it fills the `dmesg` ring (which the risky phase uses to look for `wlbt`/`scsc` errors: I filtered `IBluetoothAudio|Untracked|!@` lines out in every diff).
+
+## 11. State left on the tablet
+Both radios are running now (`wlan0` connected to `Internet`, `hci0` up). Files of mine to delete when no longer needed: `/data/local/tmp/g4/` (`iw`, `rfkill`, libnl), `/data/local/tmp/g4t/` (**contains a fake key `pa$$w0rd...` in `fake.xml`/`out/`**), `/data/local/tmp/*.sh` probe scripts, `/data/local/tmp/dmesg-*.txt`, `/data/local/tmp/shot-*.png`.
+On the PC: `out/g4shots/` (screenshots, not in git), `/tmp/opencode/g4debs/`.

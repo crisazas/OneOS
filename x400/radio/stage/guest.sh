@@ -10,6 +10,7 @@ RUN=/run/x400-radio
 LOG=/tmp/x400-radio.log
 log() { echo "$(date +%T) radio: $*" >> "$LOG"; }
 on() { [ -f $G/enable-$1 ] || [ -f $RUN/enable-$1 ]; }
+alive() { [ -f "$RUN/$1.pid" ] && kill -0 "$(cat "$RUN/$1.pid")" 2>/dev/null; }
 stop_pid() { [ -f "$RUN/$1.pid" ] && kill "$2" "$(cat "$RUN/$1.pid")" 2>/dev/null; }
 
 if [ "$1" = stop ]; then
@@ -55,7 +56,9 @@ wait_bus() {
   [ -S /run/dbus/system_bus_socket ]
 }
 
-if on wifi; then
+if on wifi && alive nm && alive wpa; then
+  log "wifi: already running (wpa_supplicant $(cat $RUN/wpa.pid), NetworkManager $(cat $RUN/nm.pid)); not started twice"
+elif on wifi; then
   log "wifi: enabled"
   wait_bus || { log "wifi: no system bus, giving up"; exit 1; }
   export DBUS_SYSTEM_BUS_ADDRESS=unix:path=/run/dbus/system_bus_socket
@@ -74,10 +77,21 @@ if on wifi; then
   log "wifi: wpa_supplicant $(cat $RUN/wpa.pid), NetworkManager $(cat $RUN/nm.pid)"
 fi
 
-if on bt; then
+if on bt && alive btbridge; then
+  log "bt: already running (bridge $(cat $RUN/btbridge.pid)); not started twice"
+elif on bt; then
   log "bt: enabled"
   wait_bus || { log "bt: no system bus, giving up"; exit 1; }
   export DBUS_SYSTEM_BUS_ADDRESS=unix:path=/run/dbus/system_bus_socket
+  # the controller address: host.sh copied the factory one (One UI's efs, which the guest does not see) to $RUN/bt_addr; the scsc_bt parameter takes it as a 48-bit integer
+  A=$(tr -d ':\r\n' < $RUN/bt_addr 2>/dev/null)
+  case "$A" in
+    [0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f])
+      if [ "$(cat /sys/module/scsc_bt/parameters/bluetooth_address 2>/dev/null)" = 0 ]; then
+        echo "0x$A" > /sys/module/scsc_bt/parameters/bluetooth_address 2>>"$LOG" && log "bt: address parameter set from efs"
+      fi ;;
+    *) log "bt: no usable efs address, the controller keeps its fallback" ;;
+  esac
   python3 $G/btbridge.py --pty-file $RUN/btbridge.pty --trace /tmp/btbridge.trace >> /tmp/btbridge.log 2>&1 &
   echo $! > $RUN/btbridge.pid
   n=0; while [ $n -lt 30 ] && ! [ -s $RUN/btbridge.pty ]; do n=$((n + 1)); sleep 0.1; done
