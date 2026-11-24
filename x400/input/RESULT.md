@@ -3,6 +3,7 @@
 ## S Pen (`x400/display/inputd.c`)
 `getevent -lp /dev/input/event10` (sec_e-pen): ABS_X 0..14680, ABS_Y 0..23488, ABS_PRESSURE 0..4095, ABS_DISTANCE 0..255, ABS_TILT_X/Y -63..63;
 keys BTN_TOUCH, BTN_STYLUS, BTN_TOOL_RUBBER, BTN_DIGI, KEY_HOMEPAGE; switches SW_PEN_INSERTED, SW_MACHINE_COVER. No BTN_TOOL_PEN, no BTN_STYLUS2 in the capabilities.
+- **(Superseded 2026-11-24: pressure and tilt do go in, through a uinput tablet and a shim that gives KWin's `--virtual` backend a libinput backend; see `x400/README.md`, "S Pen as a tablet". What follows is the analysis that was true with `fake_input` alone.)**
 - **Pressure, tilt, hover distance: no way in.** `fake-input.xml` has only pointer_motion(_absolute), button, axis, touch_*, keyboard_key(sym): no tablet requests.
   A uinput tablet does not help either: the session's KWin (`kwin_wayland --virtual`) has no libinput backend (its fds: no /dev/input, no udev socket;
   `libinput debug-events` in the guest also fails: "udev device never initialized", there is no udev). So the pen goes in as a mouse.
