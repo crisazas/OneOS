@@ -45,11 +45,11 @@ if [ "$1" != --scripts-only ]; then
     echo "system.raw verified ($got)"
 fi
 INC=/data/local/tmp/x400_incoming
-KEYS=""; [ -f "$ROOT/out/input/keys" ] && KEYS=keys
+KEYS=""; for k in keys pend x400_kwin_input.so; do [ -f "$ROOT/out/input/$k" ] && KEYS="$KEYS $k"; done
 adb_ shell "mkdir -p $INC"
 adb_ push "$ROOT/x400/oneos/guest_prepare.sh" "$ROOT/x400/oneos/guest_start.sh" "$ROOT/x400/oneos/persist-reset.sh" "$INC/" >/dev/null
 adb_ push "$ROOT/out/display/x400-display.dex" "$ROOT/out/display/libx400display.so" "$ROOT/x400/display/display.sh" \
-         "$ROOT/x400/display/bin/capture" "$ROOT/x400/display/bin/inputd" $([ -f "$ROOT/out/input/keys" ] && echo "$ROOT/out/input/keys") "$ROOT/x400/phone/session-inner.sh" \
+         "$ROOT/x400/display/bin/capture" "$ROOT/x400/display/bin/inputd" $(for k in $KEYS; do echo "$ROOT/out/input/$k"; done) "$ROOT/x400/phone/session-inner.sh" \
          "$ROOT/x400/phone/cpu-sample.sh" "$INC/" >/dev/null
 # the server with VCMD_RESOURCE_IMPORT_FD (x400/venus/vtest-import.patch) when it was built, else the plain one
 VT=$ROOT/out/venus-build-import/virgl_test_server; [ -f "$VT" ] || VT=$ROOT/out/venus-build/virgl_test_server

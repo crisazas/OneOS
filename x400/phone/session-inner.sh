@@ -86,6 +86,18 @@ if [ "$GPU_USED" = zink ] && command -v gdb >/dev/null; then
 elif [ "$GPU_USED" = zink ] && [ -n "$SHIM" ]; then
   KWIN="env LD_PRELOAD=$SHIM kwin_wayland"
 fi
+# The S Pen as a tablet (x400/input/pend.c): pend makes a uinput tablet with the pen's pressure and tilt and the udev database entry libinput wants, and
+# x400_kwin_input.so gives KWin's --virtual backend a libinput backend (it has none); both before KWin starts. Off unless X400_PEN_TABLET=1 (not tried with the real pen yet); without it, or without either file, the pen stays a mouse (inputd).
+PEND=0
+if [ -x /tmp/pend ] && [ -f /tmp/x400_kwin_input.so ] && [ "${X400_PEN_TABLET:-0}" = 1 ]; then
+  mkdir -p /run/udev/data; /tmp/pend --pen /dev/input/event10 > /tmp/pend.log 2>&1 &
+  sleep 1; PEND=1
+  chmod 666 /dev/uinput 2>/dev/null
+  export KWIN_WAYLAND_EMULATE_TABLET=1
+  if [ -n "$SHIM" ]; then SHIM="$SHIM:/tmp/x400_kwin_input.so"; else SHIM=/tmp/x400_kwin_input.so; fi
+  KWIN=$(echo "$KWIN" | sed "s|LD_PRELOAD [^']*|LD_PRELOAD $SHIM|; s|env LD_PRELOAD=[^ ]*|env LD_PRELOAD=$SHIM|")
+  case "$KWIN" in *LD_PRELOAD*) ;; *) KWIN="env LD_PRELOAD=$SHIM $KWIN";; esac
+fi
 export QT_LOGGING_RULES="kwin_screencast.debug=true;kwin_core.debug=true;kwin_scene_opengl.debug=true;kwin_wayland_backend.debug=true" PIPEWIRE_DEBUG=${PWDBG:-2}
 # the file /tmp/x400-kwin-perf (put there by the stage, since the session starts with an empty environment) makes KWin write "kwin perf statistics <output>.csv" in /tmp:
 # per frame, the target and the real pageflip time and the render start and end
@@ -93,10 +105,10 @@ export QT_LOGGING_RULES="kwin_screencast.debug=true;kwin_core.debug=true;kwin_sc
 as_user sh -c "exec $KWIN --virtual --no-lockscreen --width 2112 --height 1320 --socket wayland-x400 > /tmp/kwin.log 2>&1" &
 sleep 6
 export WAYLAND_DISPLAY=wayland-x400 QT_QPA_PLATFORM=wayland
-# KWin's virtual output has one mode, 60 Hz. Add a 120 Hz mode and make it the current one before Plasma and the capture start (X400_HZ=60 keeps 60).
-# 120 although the panel does 90: the helper presents with mailbox, so it never waits for the panel, and a faster virtual output gives KWin a shorter frame interval.
-# Measured on the SM-X400 with one wl-client, capture restarted at each mode (the stream's max framerate is fixed when it connects), mean of 3 runs: frames shown 53 fps at 90 Hz, 57 at 100, 67 at 120.
-HZ=${X400_HZ:-120}
+# KWin's virtual output has one mode, 60 Hz. Add a 90 Hz mode (the panel's) and make it the current one before Plasma and the capture start (X400_HZ=120 or 60 for another).
+# 90 since capture.c asks for maxFramerate 0/1: with the stream limited to 90/1 KWin deferred each record by 1000*denom/num ms (integer, 11 ms against an 11.1 ms cycle) and the helper
+# showed 68-69 fps at 90 Hz; without that limit it shows 89.7-90.0 (wl-client, 3 runs, same session). 120 was chosen when that limit was there: 53 fps at 90 Hz, 57 at 100, 67 at 120.
+HZ=${X400_HZ:-90}
 if [ "$HZ" != 60 ] && command -v kscreen-doctor >/dev/null; then
   n=0; while [ $n -lt 10 ]; do
     as_user kscreen-doctor -o 2>/dev/null | grep -a -q "2112x1320@$HZ" || as_user kscreen-doctor output.1.addCustomMode.2112.1320.${HZ}000.full > /dev/null 2>&1
@@ -119,7 +131,7 @@ sleep 2
 as_user kbuildsycoca6 --noincremental > /tmp/syc.log 2>&1
 as_user plasmashell > /tmp/plasma.log 2>&1 &
 sleep 4
-/tmp/inputd --touch /dev/input/event8 --pen /dev/input/event10 --grab > /tmp/inputd.log 2>&1 &
+/tmp/inputd --touch /dev/input/event8 --pen $([ "$PEND" = 1 ] && echo none || echo /dev/input/event10) --grab > /tmp/inputd.log 2>&1 &
 grp input
 sleep 8
 PIPEWIRE_DEBUG=${PWDBG:-2} /tmp/capture /tmp/fb/fb.bin > /tmp/capture.log 2>&1 &

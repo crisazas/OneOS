@@ -60,7 +60,7 @@ if [ -f "$STAGE/x400/libvulkan_virtio.so" ]; then
     VL=$(ls "$R"/usr/lib/aarch64-linux-gnu/libvulkan_virtio.so 2>/dev/null)
     [ -n "$VL" ] && $BB mount --bind "$STAGE/x400/libvulkan_virtio.so" "$VL" && say "libvulkan_virtio with dma-buf import bound over $VL"
 fi
-for f in capture inputd keys session-inner.sh cpu-sample.sh; do
+for f in capture inputd keys pend x400_kwin_input.so session-inner.sh cpu-sample.sh; do
     [ -f "$STAGE/x400/$f" ] || continue
     : > "$R/tmp/$f"; $BB mount --bind "$STAGE/x400/$f" "$R/tmp/$f"
 done
