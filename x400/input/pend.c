@@ -111,6 +111,20 @@ int main(int argc, char **argv)
   if (!f) { perror("pend: udev database"); return 1; }
   fprintf(f, "I:%lld\nE:ID_INPUT=1\nE:ID_INPUT_TABLET=1\nE:ID_INPUT_WIDTH_MM=250\nE:ID_INPUT_HEIGHT_MM=156\nG:seat\nQ:seat\n", (long long)time(NULL) * 1000000);
   fclose(f);
+  // KWin runs as the desktop's plain user and /dev/input/eventN of a new uinput device is root:input 0660: open up this one node (never the real touchscreen, pen or keyboard)
+  char node[64] = ""; int mnr = 0;
+  if (sscanf(devs, "%*d:%d", &mnr) == 1) for (int tries = 0; tries < 60 && !node[0]; tries++) {   // ueventd makes the node after sysfs shows the device
+    DIR *dd = opendir("/dev/input");
+    for (struct dirent *de; dd && (de = readdir(dd));) {
+      if (strncmp(de->d_name, "event", 5)) continue;
+      char pth[96]; snprintf(pth, sizeof pth, "/dev/input/%s", de->d_name); struct stat st;
+      if (stat(pth, &st) == 0 && S_ISCHR(st.st_mode) && major(st.st_rdev) == 13 && (int)minor(st.st_rdev) == mnr) { snprintf(node, sizeof node, "%s", pth); break; }
+    }
+    if (dd) closedir(dd);
+    if (!node[0]) usleep(100000);
+  }
+  if (node[0]) { if (chmod(node, 0666)) perror("pend: chmod"); else fprintf(stderr, "pend: %s opened to every user\n", node); }
+  else fprintf(stderr, "pend: could not find the /dev/input node of %s (%s)\n", sys, devs);
   fprintf(stderr, "pend: %s -> uinput %s (%s), udev entry %s, pressure 0..%d\n", pen, sys, devs, db, ap.maximum);
   read_orient();
 
