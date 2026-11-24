@@ -1,6 +1,7 @@
 // LD_PRELOAD shim (borrador): VirtualBackend::createInputBackend() -> new LibinputBackend(kwinApp()->session())
 #define _GNU_SOURCE
 #include <dlfcn.h>
+#include <stdio.h>
 #include <stdint.h>
 #include <sys/mman.h>
 #include <unistd.h>
@@ -21,13 +22,16 @@ __asm__(
 "  ldp x19, x20, [sp, #16]\n  ldp x29, x30, [sp], #32\n  ret\n");
 __attribute__((constructor)) static void patch(void) {
   x400_qapp_self = dlsym(RTLD_DEFAULT, "_ZN16QCoreApplication4selfE");
-  x400_libinput_ctor = dlsym(RTLD_DEFAULT, "_ZN4KWin14LibinputBackendC1EPNS_7SessionEP7QObject");
+  x400_libinput_ctor = dlsym(RTLD_DEFAULT, "_ZN4KWin15LibinputBackendC1EPNS_7SessionEP7QObject");
   void **vt = dlsym(RTLD_DEFAULT, "_ZTVN4KWin14VirtualBackendE");
   void *base = dlsym(RTLD_DEFAULT, "_ZN4KWin13OutputBackend18createInputBackendEv");
-  if (!vt || !base || !x400_qapp_self || !x400_libinput_ctor) return;
+  if (!vt || !base || !x400_qapp_self || !x400_libinput_ctor) { fprintf(stderr, "x400_kwin_input: not patched, vtable %p createInputBackend %p QCoreApplication::self %p LibinputBackend %p\n", (void *)vt, base, x400_qapp_self, x400_libinput_ctor); return; }
   long pg = sysconf(_SC_PAGESIZE);
   for (int i = 2; i < 26; i++) if (vt[i] == base) {
     void *p = (void *)((uintptr_t)&vt[i] & ~(pg - 1));
-    mprotect(p, pg, PROT_READ | PROT_WRITE); vt[i] = (void *)x400_create_input; mprotect(p, pg, PROT_READ); return;
+    int rc = mprotect(p, pg, PROT_READ | PROT_WRITE); if (rc) { fprintf(stderr, "x400_kwin_input: mprotect failed\n"); return; }
+    vt[i] = (void *)x400_create_input; mprotect(p, pg, PROT_READ);
+    fprintf(stderr, "x400_kwin_input: VirtualBackend::createInputBackend (vtable slot %d) now %p\n", i, (void *)vt[i]); return;
   }
+  fprintf(stderr, "x400_kwin_input: createInputBackend %p is in no slot of VirtualBackend's vtable %p\n", base, (void *)vt);
 }
