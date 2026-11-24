@@ -7,6 +7,7 @@
 // The orientation comes from the same file inputd reads (X400_KSCREEN_ROT, see x400/display/ROTATION.md); it is looked at again when the file's mtime changes.
 // Usage: pend [--pen /dev/input/event10] [--orient /tmp/x400-orientation.env] [--trace]
 #define _GNU_SOURCE
+#include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <linux/input.h>
@@ -92,9 +93,15 @@ int main(int argc, char **argv)
   if (ioctl(ufd, UI_DEV_SETUP, &us) || ioctl(ufd, UI_DEV_CREATE)) { perror("pend: uinput create"); return 1; }
   char sys[64] = ""; ioctl(ufd, UI_GET_SYSNAME(sizeof sys), sys);
   char dp[128], devs[32] = ""; snprintf(dp, sizeof dp, "/sys/class/input/%s", sys);
-  // /sys/class/input/inputN/eventM/dev holds "13:<minor>"
+  // /sys/class/input/inputN/eventM/dev holds "13:<minor>"; M is whatever number the kernel gave it
   for (int tries = 0; tries < 50 && !devs[0]; tries++) {
-    char g[160]; for (int m = 64; m < 256 && !devs[0]; m++) { snprintf(g, sizeof g, "%s/event%d/dev", dp, m); FILE *f = fopen(g, "r"); if (f) { if (fgets(devs, sizeof devs, f)) devs[strcspn(devs, "\n")] = 0; fclose(f); } }
+    DIR *dd = opendir(dp);
+    for (struct dirent *de; dd && (de = readdir(dd)) && !devs[0];) {
+      if (strncmp(de->d_name, "event", 5)) continue;
+      char g[300]; snprintf(g, sizeof g, "%s/%s/dev", dp, de->d_name);
+      FILE *f = fopen(g, "r"); if (f) { if (fgets(devs, sizeof devs, f)) devs[strcspn(devs, "\n")] = 0; fclose(f); }
+    }
+    if (dd) closedir(dd);
     if (!devs[0]) usleep(100000);
   }
   if (!devs[0]) { fprintf(stderr, "pend: no event node for %s\n", sys); return 1; }
