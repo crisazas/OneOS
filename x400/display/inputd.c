@@ -209,9 +209,11 @@ static void kbd_release(void)
 struct finger { int x, y, lx, ly, known, have, active; };
 // tap-to-drag: a tap presses the left button when the finger lifts and lets go TAP_HOLD_MS later; a finger that comes down again inside that time keeps it pressed while it moves
 // (dragging a tab, a window, a selection) and lets go when it lifts; if that second touch is a short tap too, it is a double click.
-#define TAP_HOLD_MS 200
+#define TAP_HOLD_MS 300   // libinput's own tap-and-drag timeout
+#define EDGE_X 45         // the pad is 819 x 1559 units, 55 x 104 mm: a finger lifted this close to an edge (units) ran out of pad, not out of intent
+#define EDGE_Y 90
 #define TAP_MIN_MS 12   // a contact shorter than this is the sensor bouncing, not a finger
-struct pad { struct finger f[3]; int slot, n, prevn, multi, btnused, down[2]; double travel; long t0; int hold, dragging; long hold_until; };
+struct pad { struct finger f[3]; int slot, n, prevn, multi, btnused, down[2]; double travel; long t0; int hold, dragging, first_move; long hold_until; };
 static struct pad pad;
 static long mono_ms(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return t.tv_sec * 1000L + t.tv_nsec / 1000000L; }
 static void pad_hold_release(void)
@@ -251,7 +253,7 @@ static void pad_event(struct input_event *e)
     if (n != pad.prevn) {
       if (pad.prevn == 0 && n > 0) {
         pad.t0 = ms; pad.travel = 0; pad.multi = 0; if (!pad.down[0] && !pad.down[1]) pad.btnused = 0;
-        if (pad.hold) { pad.dragging = 1; pad.hold_until = 0; if (trace) fprintf(stderr, "padraw second touch: button stays down\n"); }
+        if (pad.hold) { pad.dragging = 1; pad.hold_until = 0; pad.first_move = 1; if (trace) fprintf(stderr, "padraw %ld.%03ld second touch down: button stays down\n", (long)e->time.tv_sec % 1000, (long)e->time.tv_usec / 1000); }
       }
       if (n > 1) pad.multi = 1;
       if (n == 0 && pad.prevn == 1) {
@@ -261,7 +263,13 @@ static void pad_event(struct input_event *e)
         if (pad.dragging) {
           if (dur < TAP_MIN_MS && !pad.multi && pad.travel < 60) { pad.dragging = 0; pad.hold_until = mono_ms() + TAP_HOLD_MS; what = "bounce, hold kept"; }
           else if (ok) { pad_hold_release(); org_kde_kwin_fake_input_button(fake, BTN_LEFT, 1); org_kde_kwin_fake_input_button(fake, BTN_LEFT, 0); wl_display_flush(dpy); what = "DOUBLE"; }
-          else { pad_hold_release(); what = "DRAG end"; }
+          else {
+            // a drag that ends at the pad's edge is the finger running out of pad (a selection rectangle is wider than 55 mm): the button stays down for a moment, so a touch that follows goes on with the same drag
+            struct finger *lf = &pad.f[pad.slot];
+            int edge = pad.travel > 0 && (lf->x < EDGE_X || lf->x > 819 - EDGE_X || lf->y < EDGE_Y || lf->y > 1559 - EDGE_Y);
+            if (edge) { pad.dragging = 0; pad.hold_until = mono_ms() + TAP_HOLD_MS; what = "DRAG paused at the edge"; }
+            else { pad_hold_release(); what = "DRAG end"; }
+          }
         } else if (ok) {
           org_kde_kwin_fake_input_button(fake, BTN_LEFT, 1); wl_display_flush(dpy);
           pad.hold = 1; pad.dragging = 0; pad.hold_until = mono_ms() + TAP_HOLD_MS;
@@ -287,6 +295,7 @@ static void pad_event(struct input_event *e)
     case 2:  sx = -dx; sy = -dy; break;
     default: sx = dx;  sy = dy; break;
     }
+    if (trace && pad.dragging && pad.first_move) { pad.first_move = 0; fprintf(stderr, "padraw %ld.%03ld first drag motion: %ld ms after the touch, finger moved %.0f units (15 per mm)\n", (long)e->time.tv_sec % 1000, (long)e->time.tv_usec / 1000, ms - pad.t0, pad.travel); }
     if (n == 1) org_kde_kwin_fake_input_pointer_motion(fake, wl_fixed_from_double(sx * pad_gain), wl_fixed_from_double(sy * pad_gain));
     else if (n == 2) {
       double k = natural ? -scroll_gain : scroll_gain;
