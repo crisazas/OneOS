@@ -11,6 +11,9 @@ fi
 [ "$U" != root ] && chmod 666 /tmp/.virgl_test* 2>/dev/null
 as_user() { if [ "$U" = root ]; then "$@"; else setpriv --reuid=$U --regid=$U --init-groups "$@"; fi; }
 export HOME=$UH USER=$U LOGNAME=$U XDG_RUNTIME_DIR=/run/user/$UIDN LANG=C.UTF-8 XDG_SESSION_TYPE=wayland XDG_CURRENT_DESKTOP=KDE KDE_FULL_SESSION=true
+# Plasma's menu file in the image is plasma-applications.menu (no plain applications.menu): startplasma sets the prefix, this script starts the pieces by hand and
+# must too, or kbuildsycoca6 finds no menu, indexes no application, and the launcher lists none
+export XDG_MENU_PREFIX=plasma-
 # the keyboard cover's layout (KWin falls back to the environment when kxkbrc names none); X400_KBD_LAYOUT=us for an English one
 export XKB_DEFAULT_LAYOUT=${X400_KBD_LAYOUT:-es}
 export XDG_DATA_DIRS=/usr/share XDG_CONFIG_DIRS=/etc/xdg KWIN_WAYLAND_NO_PERMISSION_CHECKS=1
@@ -113,7 +116,7 @@ as_user kded6 > /tmp/kded.log 2>&1 &
 sleep 3
 as_user $L/kactivitymanagerd > /tmp/kam.log 2>&1 &
 sleep 2
-as_user kbuildsycoca6 > /tmp/syc.log 2>&1
+as_user kbuildsycoca6 --noincremental > /tmp/syc.log 2>&1
 as_user plasmashell > /tmp/plasma.log 2>&1 &
 sleep 4
 /tmp/inputd --touch /dev/input/event8 --pen /dev/input/event10 --grab > /tmp/inputd.log 2>&1 &
