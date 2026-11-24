@@ -207,17 +207,32 @@ static void kbd_release(void)
 
 // Cover's trackpad: up to 3 fingers (ABS_MT slots, protocol B). Positions are in the pad's own units (15 per mm).
 struct finger { int x, y, lx, ly, known, have, active; };
-struct pad { struct finger f[3]; int slot, n, prevn, multi, btnused, down[2]; double travel; long t0; };
+// tap-to-drag: a tap presses the left button when the finger lifts and lets go TAP_HOLD_MS later; a finger that comes down again inside that time keeps it pressed while it moves
+// (dragging a tab, a window, a selection) and lets go when it lifts; if that second touch is a short tap too, it is a double click.
+#define TAP_HOLD_MS 200
+#define TAP_MIN_MS 12   // a contact shorter than this is the sensor bouncing, not a finger
+struct pad { struct finger f[3]; int slot, n, prevn, multi, btnused, down[2]; double travel; long t0; int hold, dragging; long hold_until; };
 static struct pad pad;
+static long mono_ms(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return t.tv_sec * 1000L + t.tv_nsec / 1000000L; }
+static void pad_hold_release(void)
+{
+  if (pad.hold) { org_kde_kwin_fake_input_button(fake, BTN_LEFT, 0); wl_display_flush(dpy); if (trace) fprintf(stderr, "padraw hold released\n"); }
+  pad.hold = pad.dragging = 0; pad.hold_until = 0;
+}
+// called from the main loop: the button a tap pressed is let go when nothing came down again in time
+static void pad_tick(void) { if (pad.hold && !pad.dragging && mono_ms() >= pad.hold_until) pad_hold_release(); }
 static double pad_gain = 1.3, scroll_gain = 0.35; static int natural;
 static void pad_buttons_up(void)
 {
   for (int i = 0; i < 2; i++) if (pad.down[i]) { org_kde_kwin_fake_input_button(fake, BTN_LEFT + i, 0); pad.down[i] = 0; }
+  pad_hold_release();
   wl_display_flush(dpy);
 }
 static void pad_event(struct input_event *e)
 {
   struct finger *f = &pad.f[pad.slot];
+  if (trace && e->type == EV_ABS && (e->code == ABS_MT_SLOT || e->code == ABS_MT_TRACKING_ID)) fprintf(stderr, "padraw %ld.%03ld %s %d\n", (long)e->time.tv_sec % 1000, (long)e->time.tv_usec / 1000, e->code == ABS_MT_SLOT ? "slot" : "id", e->value);
+  else if (trace && e->type == EV_KEY) fprintf(stderr, "padraw %ld.%03ld key %d %d\n", (long)e->time.tv_sec % 1000, (long)e->time.tv_usec / 1000, e->code, e->value);
   if (e->type == EV_ABS) {
     if (e->code == ABS_MT_SLOT) { if (e->value >= 0 && e->value < 3) pad.slot = e->value; }
     else if (e->code == ABS_MT_TRACKING_ID) { f->active = e->value >= 0; f->known = f->have = 0; }
@@ -225,6 +240,7 @@ static void pad_event(struct input_event *e)
     else if (e->code == ABS_MT_POSITION_Y) { f->y = e->value; f->known |= 2; }
   } else if (e->type == EV_KEY && (e->code == BTN_LEFT || e->code == BTN_RIGHT)) {
     int i = e->code - BTN_LEFT;
+    if (e->value) pad_hold_release();
     org_kde_kwin_fake_input_button(fake, e->code, e->value ? 1 : 0);
     pad.down[i] = e->value ? 1 : 0; if (e->value) pad.btnused = 1;
     wl_display_flush(dpy);
@@ -233,11 +249,24 @@ static void pad_event(struct input_event *e)
     int n = 0, cnt = 0; double dx = 0, dy = 0;
     for (int i = 0; i < 3; i++) if (pad.f[i].active) n++;
     if (n != pad.prevn) {
-      if (pad.prevn == 0 && n > 0) { pad.t0 = ms; pad.travel = 0; pad.multi = 0; if (!pad.down[0] && !pad.down[1]) pad.btnused = 0; }
+      if (pad.prevn == 0 && n > 0) {
+        pad.t0 = ms; pad.travel = 0; pad.multi = 0; if (!pad.down[0] && !pad.down[1]) pad.btnused = 0;
+        if (pad.hold) { pad.dragging = 1; pad.hold_until = 0; if (trace) fprintf(stderr, "padraw second touch: button stays down\n"); }
+      }
       if (n > 1) pad.multi = 1;
-      if (n == 0 && pad.prevn == 1 && !pad.multi && !pad.btnused && ms - pad.t0 < 250 && pad.travel < 60) {
-        org_kde_kwin_fake_input_button(fake, BTN_LEFT, 1); org_kde_kwin_fake_input_button(fake, BTN_LEFT, 0); wl_display_flush(dpy);
-        if (trace) fprintf(stderr, "pad tap\n");
+      if (n == 0 && pad.prevn == 1) {
+        long dur = ms - pad.t0;
+        int ok = !pad.multi && !pad.btnused && dur >= TAP_MIN_MS && dur < 250 && pad.travel < 60;
+        const char *what = ok ? "TAP" : "NOTAP";
+        if (pad.dragging) {
+          if (dur < TAP_MIN_MS && !pad.multi && pad.travel < 60) { pad.dragging = 0; pad.hold_until = mono_ms() + TAP_HOLD_MS; what = "bounce, hold kept"; }
+          else if (ok) { pad_hold_release(); org_kde_kwin_fake_input_button(fake, BTN_LEFT, 1); org_kde_kwin_fake_input_button(fake, BTN_LEFT, 0); wl_display_flush(dpy); what = "DOUBLE"; }
+          else { pad_hold_release(); what = "DRAG end"; }
+        } else if (ok) {
+          org_kde_kwin_fake_input_button(fake, BTN_LEFT, 1); wl_display_flush(dpy);
+          pad.hold = 1; pad.dragging = 0; pad.hold_until = mono_ms() + TAP_HOLD_MS;
+        }
+        if (trace) fprintf(stderr, "padraw %ld.%03ld %s (contact %ld ms, travel %.0f, multi %d, btnused %d)\n", (long)e->time.tv_sec % 1000, (long)e->time.tv_usec / 1000, what, dur, pad.travel, pad.multi, pad.btnused);
       }
       for (int i = 0; i < 3; i++) pad.f[i].have = 0;
       pad.prevn = n;
@@ -345,7 +374,8 @@ int main(int argc, char **argv)
       if (tp.fd < 0 && strcmp(tpname, "none") && find_event(tpname, dp, sizeof dp) == 0 && !is_side_key(dp) && open_dev(dp, grab, &tp) == 0) { memset(&pad, 0, sizeof pad); fprintf(stderr, "inputd: touchpad %s\n", dp); }
     }
     pf[4].fd = kb.fd; pf[5].fd = tp.fd;
-    if (poll(pf, 6, 500) < 0 && errno != EINTR) break;
+    if (poll(pf, 6, pad.hold && !pad.dragging ? 20 : 500) < 0 && errno != EINTR) break;
+    pad_tick();
     if (in >= 0 && (pf[3].revents & POLLIN)) {
       char buf[1024] __attribute__((aligned(8))); ssize_t k = read(in, buf, sizeof buf);
       for (char *q = buf; k > 0 && q < buf + k; q += sizeof(struct inotify_event) + ((struct inotify_event *)q)->len)
