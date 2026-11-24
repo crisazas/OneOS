@@ -23,8 +23,6 @@ for d in x400/*/image-conf; do [ -d "$d" ] || continue
   sudo mkdir -p "$R/etc/wireplumber/wireplumber.conf.d"; sudo cp "$d"/*.conf "$R/etc/wireplumber/wireplumber.conf.d/"
 done
 [ -f x400/input/kwinrc-keyboard ] && { sudo mkdir -p "$R/etc/xdg"; grep -v '^#' x400/input/kwinrc-keyboard | sudo tee "$R/etc/xdg/kwinrc" >/dev/null; }
-# the apps that need their own environment: x400/apps/bin/<name> goes to /usr/local/bin, which comes before /usr/bin in PATH (their .desktop files call them by name)
-[ -d x400/apps/bin ] && { sudo mkdir -p "$R/usr/local/bin"; sudo install -m 755 x400/apps/bin/* "$R/usr/local/bin/"; }
 umnt
 sudo rm -f "$R/usr/bin/qemu-aarch64-static" "$R/etc/resolv.conf"
 echo "installed: $PKGS"

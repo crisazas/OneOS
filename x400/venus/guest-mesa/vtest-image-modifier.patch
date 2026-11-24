@@ -1,0 +1,59 @@
+--- a/src/virtio/vulkan/vn_image.c
++++ b/src/virtio/vulkan/vn_image.c
+@@ -559,6 +559,28 @@
+    VkImageDrmFormatModifierExplicitCreateInfoEXT modifier_explicit;
+ };
+ 
++/* linux-x400: the renderer (Samsung's Mali) takes an exportable image only as VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT: with OPTIMAL tiling it answers
++ * VK_ERROR_INVALID_EXTERNAL_HANDLE (OPAQUE_FD) or VK_ERROR_INVALID_DRM_FORMAT_MODIFIER_PLANE_LAYOUT_EXT (DMA_BUF), and so does Zink's first probe image
++ * (a 2x2 exportable image), after which a client such as Falkon or Haruna dies. Such a request is made with the one modifier the renderer is known to take
++ * (DRM_FORMAT_MOD_LINEAR = 0); an app that already names a modifier is left as it is. */
++static const uint64_t vn_image_linear_modifier = 0;
++
++static bool
++vn_image_needs_linear_modifier(const VkImageCreateInfo *create_info,
++                               const VkExternalMemoryHandleTypeFlagBits renderer_handle_type)
++{
++   if (renderer_handle_type != VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT ||
++       create_info->tiling != VK_IMAGE_TILING_OPTIMAL)
++      return false;
++
++   vk_foreach_struct_const(src, create_info->pNext) {
++      if (src->sType == VK_STRUCTURE_TYPE_IMAGE_DRM_FORMAT_MODIFIER_LIST_CREATE_INFO_EXT ||
++          src->sType == VK_STRUCTURE_TYPE_IMAGE_DRM_FORMAT_MODIFIER_EXPLICIT_CREATE_INFO_EXT)
++         return false;
++   }
++   return true;
++}
++
+ static const VkImageCreateInfo *
+ vn_image_fix_create_info(
+    const VkImageCreateInfo *create_info,
+@@ -605,6 +627,17 @@
+       }
+    }
+ 
++   if (vn_image_needs_linear_modifier(create_info, renderer_handle_type)) {
++      local_info->create.tiling = VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT;
++      local_info->modifier_list = (VkImageDrmFormatModifierListCreateInfoEXT){
++         .sType = VK_STRUCTURE_TYPE_IMAGE_DRM_FORMAT_MODIFIER_LIST_CREATE_INFO_EXT,
++         .drmFormatModifierCount = 1,
++         .pDrmFormatModifiers = &vn_image_linear_modifier,
++      };
++      cur->pNext = (void *)&local_info->modifier_list;
++      cur = (void *)&local_info->modifier_list;
++   }
++
+    cur->pNext = NULL;
+ 
+    return &local_info->create;
+@@ -686,7 +719,8 @@
+    } else {
+       struct vn_image_create_info local_info;
+       if (external_info &&
+-          external_info->handleTypes != renderer_handle_type) {
++          (external_info->handleTypes != renderer_handle_type ||
++           vn_image_needs_linear_modifier(pCreateInfo, renderer_handle_type))) {
+          pCreateInfo = vn_image_fix_create_info(
+             pCreateInfo, renderer_handle_type, &local_info);
+       }

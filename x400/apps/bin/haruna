@@ -1,5 +1,0 @@
-#!/bin/sh
-# Zink on Venus cannot export the dma-bufs this desktop imports for this app (vkCreateImage ... DRM_FORMAT_MODIFIER_PLANE_LAYOUT, then a Wayland protocol error):
-# the app draws with llvmpipe (software GL) while the desktop stays on Zink.
-export MESA_LOADER_DRIVER_OVERRIDE=llvmpipe GALLIUM_DRIVER=llvmpipe
-exec /usr/bin/haruna "$@"
