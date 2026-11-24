@@ -52,6 +52,8 @@ $BB mount -t tmpfs -o mode=1777,size=32m tmpfs "$D/fb" || say "tmpfs for the fra
 mkdir -p "$R/tmp/fb"; $BB mount --bind "$D/fb" "$R/tmp/fb"
 # $STAGE/x400/kwin-perf present: KWin logs its per-frame timing (session-inner.sh looks for /tmp/x400-kwin-perf)
 [ -e "$STAGE/x400/kwin-perf" ] && : > "$R/tmp/x400-kwin-perf"
+# $STAGE/x400/pen-tablet present: the S Pen goes in as a tablet (session-inner.sh looks for /tmp/x400-pen-tablet; the session starts with an empty environment, so X400_PEN_TABLET cannot reach it)
+[ -e "$STAGE/x400/pen-tablet" ] || [ "${X400_PEN_TABLET:-0}" = 1 ] && : > "$R/tmp/x400-pen-tablet"
 if [ -d "$STAGE/x400/mesa25" ]; then
     mkdir -p "$R/tmp/mesa25"; $BB mount --bind "$STAGE/x400/mesa25" "$R/tmp/mesa25" && say "Mesa 25.0.7 for Zink bound at /tmp/mesa25"
 fi

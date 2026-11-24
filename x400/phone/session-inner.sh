@@ -87,9 +87,9 @@ elif [ "$GPU_USED" = zink ] && [ -n "$SHIM" ]; then
   KWIN="env LD_PRELOAD=$SHIM kwin_wayland"
 fi
 # The S Pen as a tablet (x400/input/pend.c): pend makes a uinput tablet with the pen's pressure and tilt and the udev database entry libinput wants, and
-# x400_kwin_input.so gives KWin's --virtual backend a libinput backend (it has none); both before KWin starts. Off unless X400_PEN_TABLET=1 (not tried with the real pen yet); without it, or without either file, the pen stays a mouse (inputd).
+# x400_kwin_input.so gives KWin's --virtual backend a libinput backend (it has none); both before KWin starts. Off unless /tmp/x400-pen-tablet exists (guest_start.sh makes it when $STAGE/x400/pen-tablet exists or X400_PEN_TABLET=1; not tried with the real pen yet); without it, or without either file, the pen stays a mouse (inputd).
 PEND=0
-if [ -x /tmp/pend ] && [ -f /tmp/x400_kwin_input.so ] && [ "${X400_PEN_TABLET:-0}" = 1 ]; then
+if [ -x /tmp/pend ] && [ -f /tmp/x400_kwin_input.so ] && [ -e /tmp/x400-pen-tablet ]; then
   mkdir -p /run/udev/data; /tmp/pend --pen /dev/input/event10 > /tmp/pend.log 2>&1 &
   sleep 1; PEND=1
   chmod 666 /dev/uinput 2>/dev/null
