@@ -132,6 +132,20 @@ VKR_DMA_HEAP_NODE=${X400_DMA_HEAP:-/dev/dma_heap/system-uncached} VKR_TRACE=${X4
 say "Venus server $!"
 sleep 1
 
+# CPU ceiling. One UI's power manager leaves a vote in cpufreq_limit/cpufreq_max_limit before the switch (1.5 of 2.4 GHz on the big cluster here) and with the
+# framework stopped nothing lifts it: OneOS's heat cap only does when it can read the skin temperature from the guest's thermalservice, which this guest does not
+# have. KWin's main thread is what limits the frame rate, and the same session measured 56-61 fps at 90 Hz with the vote and 66 without. So it is lifted here,
+# once; the way back (return_to_oneui.sh) finds the old vote in cpufreq_max_limit.released and lifts it for One UI's power manager to vote afresh.
+# X400_CPU_FULL=0 leaves it as it was.
+if [ "${X400_CPU_FULL:-1}" != 0 ]; then
+    CFL=/sys/devices/system/cpu/cpufreq_limit/cpufreq_max_limit
+    old=$(cat $CFL 2>/dev/null)
+    [ -n "$old" ] && [ "$old" != -1 ] && echo "$old" > "$STAGE/cpufreq_max_limit.released"
+    [ -w $CFL ] && echo -1 > $CFL 2>/dev/null
+    for p in /sys/devices/system/cpu/cpufreq/policy*; do cat "$p/cpuinfo_max_freq" > "$p/scaling_max_freq" 2>/dev/null; done
+    say "CPU ceiling lifted: cpufreq_max_limit $old -> $(cat $CFL 2>/dev/null), big cluster $(cat /sys/devices/system/cpu/cpufreq/policy4/scaling_max_freq 2>/dev/null) kHz (X400_CPU_FULL=0 leaves it)"
+fi
+
 # A frame file left by an earlier session has a high seq and would pass the wait below at once, before this desktop has drawn
 # anything (the display helper then found no file and left: the desktop ran and nothing showed it).
 rm -f "$D/fb/fb.bin"
