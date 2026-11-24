@@ -18,6 +18,7 @@
 // KWin is there. Never opens the side keys (event0..event4).
 #define _GNU_SOURCE
 #include "fake-input-client-protocol.h"
+#include "xdg-output-unstable-v1-client-protocol.h"
 #include <errno.h>
 #include <fcntl.h>
 #include <linux/input.h>
@@ -38,13 +39,27 @@ static volatile int stopping;
 static volatile int reload;
 static void on_sig(int n) { (void)n; stopping = 1; }
 static void on_hup(int n) { (void)n; reload = 1; }
+static struct zxdg_output_manager_v1 *xman; static struct wl_output *wout; static int xdg_size;
+static int W = 2112, H = 1320, rot = 1, quiet, trace;
+// KWin's coordinates for fake_input are the logical ones (output size / scale: 1408x880 at scale 1.5), so the size comes from xdg_output and follows scale and rotation live
+static void xo_pos(void *d, struct zxdg_output_v1 *o, int32_t x, int32_t y) { (void)d; (void)o; (void)x; (void)y; }
+static void xo_size(void *d, struct zxdg_output_v1 *o, int32_t w, int32_t h)
+{ (void)d; (void)o; if (w > 0 && h > 0 && (w != W || h != H)) { fprintf(stderr, "inputd: logical size %dx%d -> %dx%d (xdg_output)\n", W, H, w, h); W = w; H = h; } if (w > 0 && h > 0) xdg_size = 1; }
+static void xo_done(void *d, struct zxdg_output_v1 *o) { (void)d; (void)o; }
+static void xo_name(void *d, struct zxdg_output_v1 *o, const char *n) { (void)d; (void)o; (void)n; }
+static void xo_desc(void *d, struct zxdg_output_v1 *o, const char *n) { (void)d; (void)o; (void)n; }
+static const struct zxdg_output_v1_listener xol = { xo_pos, xo_size, xo_done, xo_name, xo_desc };
 static void reg_global(void *d, struct wl_registry *r, uint32_t id, const char *iface, uint32_t ver)
-{ (void)d; if (!strcmp(iface, "org_kde_kwin_fake_input")) fake = wl_registry_bind(r, id, &org_kde_kwin_fake_input_interface, ver < 4 ? ver : 4); }
+{
+  (void)d;
+  if (!strcmp(iface, "org_kde_kwin_fake_input")) fake = wl_registry_bind(r, id, &org_kde_kwin_fake_input_interface, ver < 4 ? ver : 4);
+  else if (!strcmp(iface, "zxdg_output_manager_v1")) xman = wl_registry_bind(r, id, &zxdg_output_manager_v1_interface, ver < 2 ? ver : 2);
+  else if (!strcmp(iface, "wl_output") && !wout) wout = wl_registry_bind(r, id, &wl_output_interface, 2);
+}
 static void reg_remove(void *d, struct wl_registry *r, uint32_t id) { (void)d; (void)r; (void)id; }
 static const struct wl_registry_listener reg_l = { reg_global, reg_remove };
 
 struct dev { int fd; int xmax, ymax; int pxmax, pymax, pmax; };
-static int W = 2112, H = 1320, rot = 1, quiet, trace;
 
 static void map(int x, int y, int xmax, int ymax, double *ox, double *oy)
 {
@@ -77,6 +92,7 @@ static int read_orient(void)
   int nr = tr;
   if (!strcmp(ks, "none")) nr = 1; else if (!strcmp(ks, "left")) nr = 2; else if (!strcmp(ks, "inverted")) nr = 3; else if (!strcmp(ks, "right")) nr = 0;
   if (nr < 0 || nr > 3 || w <= 0 || h <= 0) { fprintf(stderr, "inputd: %s: no usable orientation (kscreen '%s', rot %d, %dx%d)\n", orient_path, ks, tr, w, h); return 0; }
+  if (xdg_size) { w = W; h = H; }   // KWin's own logical size wins over the file's
   if (nr == rot && w == W && h == H) return 0;
   fprintf(stderr, "inputd: orientation %s: rot %d -> %d, size %dx%d -> %dx%d\n", ks, rot, nr, W, H, w, h);
   rot = nr; W = w; H = h;
@@ -234,7 +250,14 @@ static void pad_event(struct input_event *e)
     }
     if (cnt == 0 || (dx == 0 && dy == 0)) return;
     dx /= cnt; dy /= cnt; pad.travel += (dx < 0 ? -dx : dx) + (dy < 0 ? -dy : dy);
-    double sx = dy, sy = -dx;   // the pad is the natural portrait frame: its +Y is screen right, its -X is screen down
+    // the pad is the natural portrait frame, like the touchscreen, so its deltas turn with the same table as map(): rot 1 (landscape): +Y is screen right, -X is screen down
+    double sx, sy;
+    switch (rot) {
+    case 1:  sx = dy;  sy = -dx; break;
+    case 3:  sx = -dy; sy = dx; break;
+    case 2:  sx = -dx; sy = -dy; break;
+    default: sx = dx;  sy = dy; break;
+    }
     if (n == 1) org_kde_kwin_fake_input_pointer_motion(fake, wl_fixed_from_double(sx * pad_gain), wl_fixed_from_double(sy * pad_gain));
     else if (n == 2) {
       double k = natural ? -scroll_gain : scroll_gain;
@@ -283,7 +306,7 @@ int main(int argc, char **argv)
     else if (!strcmp(argv[i], "--trace")) trace = 1;
     else { fprintf(stderr, "usage: inputd [--touch DEV] [--pen DEV] [--rot 0..3] [--size WxH] [--orient FILE|none] [--keyboard NAME|none] [--touchpad NAME|none] [--pad-gain F] [--natural-scroll] [--grab] [--quiet] [--trace]\n"); return 2; }
   }
-  if (is_side_key(touch) || (pen && is_side_key(pen))) { fprintf(stderr, "inputd: refusing the side keys\n"); return 2; }
+  if (is_side_key(touch) || (pen && strcmp(pen, "none") && is_side_key(pen))) { fprintf(stderr, "inputd: refusing the side keys\n"); return 2; }
   struct sigaction sa = { .sa_handler = on_sig }; sigemptyset(&sa.sa_mask);
   sigaction(SIGTERM, &sa, NULL); sigaction(SIGINT, &sa, NULL);
   struct sigaction sh = { .sa_handler = on_hup }; sigemptyset(&sh.sa_mask); sigaction(SIGHUP, &sh, NULL);
@@ -293,11 +316,13 @@ int main(int argc, char **argv)
   wl_registry_add_listener(r, &reg_l, NULL);
   wl_display_roundtrip(dpy);
   if (!fake) { fprintf(stderr, "inputd: KWin offers no org_kde_kwin_fake_input\n"); return 1; }
+  if (xman && wout) { zxdg_output_v1_add_listener(zxdg_output_manager_v1_get_xdg_output(xman, wout), &xol, NULL); wl_display_roundtrip(dpy); wl_display_roundtrip(dpy); }
   org_kde_kwin_fake_input_authenticate(fake, "x400 inputd", "touch and pen of the tablet");
   wl_display_roundtrip(dpy);
   struct dev t = { .fd = -1 }, p = { .fd = -1 };
   if (strcmp(touch, "none") && open_dev(touch, grab, &t) < 0) return 1;
   int cur = 0; unsigned long n = 0; struct pen ps = { .lx = -1, .ly = -1 };
+  if (pen && !strcmp(pen, "none")) pen = NULL;
   if (pen && open_dev(pen, 0, &p) < 0) pen = NULL;
   cur_pen = &ps;
   read_orient();
