@@ -21,12 +21,6 @@ fi
 for b in /usr/bin/kwin_wayland; do
     python3 -c 'import os,sys; os.removexattr(sys.argv[1], "security.capability")' "$b" 2> /dev/null
 done
-# The lock screen's greeter is a Qt Quick app and, like falkon and haruna, cannot import Zink's dma-bufs (the Wayland connection dies with "importing the supplied dmabufs
-# failed", kscreenlocker goes to its emergency mode and the screen stays black): it draws with llvmpipe. The real binary stays beside the wrapper, in the persistent layer.
-G=/usr/lib/aarch64-linux-gnu/libexec/kscreenlocker_greet
-if [ -x "$G" ] && [ ! -e "$G.real" ]; then
-    mv "$G" "$G.real" && printf '#!/bin/sh\nexport MESA_LOADER_DRIVER_OVERRIDE=llvmpipe GALLIUM_DRIVER=llvmpipe\nexec %s.real "$@"\n' "$G" > "$G" && chmod 755 "$G"
-fi
 # sudo without a password: root is one command away, it is just not what everything runs as
 printf '%s ALL=(ALL) NOPASSWD:ALL\n' "$U" > /etc/sudoers.d/x400-user && chmod 440 /etc/sudoers.d/x400-user
 # sudo looks its own host name up; this guest's (Android's) is not in /etc/hosts
@@ -41,10 +35,8 @@ if [ ! -e "$H/.x400-migrated" ]; then
     [ -f "$H/.local/share/user-places.xbel" ] && sed -i "s#file:///root#file://$H#g" "$H/.local/share/user-places.xbel"
     : > "$H/.x400-migrated"
 fi
-# The user's password (the lock screen asks for it; sudo stays without one). Only its hash travels, in an untracked file (x400/user/stage/password.hash, made by
+# The user's password (sudo stays without one; the lock screen is off: KWin runs with --no-lockscreen). Only its hash travels, in an untracked file (x400/user/stage/password.hash, made by
 # `openssl passwd -6`); without the file the account stays locked for passwords, as before.
 [ -s /tmp/x400/user/password.hash ] && usermod -p "$(cat /tmp/x400/user/password.hash)" "$U" && echo "user: password set"
-# Lock screen defaults (Settings > Screen Locking, kept in the user's own ~/.config, overrides these): no automatic lock, so that a locked tablet is always the user's doing
-mkdir -p /etc/xdg && printf '[Daemon]\nAutolock=false\nLockOnResume=false\n' > /etc/xdg/kscreenlockerrc
 chown -R "$U:$U" "$H"
 echo "user: $U ($(id -u "$U")) ready, home $H"
